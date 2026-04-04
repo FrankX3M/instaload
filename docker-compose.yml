@@ -1,0 +1,10 @@
+services:
+  instagram-bot:
+    build: .
+    restart: always
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - IG_USERNAME=${IG_USERNAME:-}
+      - IG_PASSWORD=${IG_PASSWORD:-}
+    volumes:
+      - /tmp/bot_videos:/tmp  # временные видеофайлы вне контейнера
