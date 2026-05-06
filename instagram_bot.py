@@ -9,6 +9,7 @@ Telegram-бот для загрузки Instagram Reels и TikTok видео ч�
 
 import re
 import os
+import shutil
 import tempfile
 import logging
 import yt_dlp
@@ -41,9 +42,8 @@ TIKTOK_PATTERN = re.compile(
 
 # ─── СКАЧИВАНИЕ ЧЕРЕЗ YT-DLP ──────────────────────────────────────────────────
 
-def download_video(url: str, is_instagram: bool = False) -> str | None:
+def download_video(url: str, tmp_dir: str, is_instagram: bool = False) -> str | None:
     """Скачивает видео через yt-dlp, возвращает путь к файлу или None"""
-    tmp_dir = tempfile.mkdtemp()
     output_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
 
     ydl_opts = {
@@ -87,36 +87,36 @@ def download_video(url: str, is_instagram: bool = False) -> str | None:
 # ─── ОБЩАЯ ЛОГИКА ОТПРАВКИ ─────────────────────────────────────────────────────
 
 async def process_url(message, url: str, is_instagram: bool):
-    """Скачивает видео и отправляет в чат"""
+    """Скачивает видео и отправляет в чат, гарантированно удаляет временные файлы"""
     platform = "Instagram" if is_instagram else "TikTok"
     icon = "📸" if is_instagram else "🎵"
     log.info(f"[{platform}] Обрабатываю: {url}")
 
     status = await message.reply_text(f"⏳ Скачиваю {platform} видео...")
 
-    video_path = download_video(url, is_instagram=is_instagram)
-
-    if not video_path:
-        err_hint = (
-            "Возможно пост приватный или Instagram заблокировал запрос."
-            if is_instagram else
-            "TikTok мог заблокировать запрос, попробуйте позже."
-        )
-        await status.edit_text(f"❌ Не удалось скачать видео.\n{err_hint}\n🔗 {url}")
-        return
-
-    size_mb = os.path.getsize(video_path) / 1024 / 1024
-
-    if size_mb > 50:
-        os.unlink(video_path)
-        await status.edit_text(
-            f"⚠️ Видео слишком большое ({size_mb:.0f} МБ).\n"
-            f"Telegram-боты не могут отправлять файлы > 50 МБ.\n"
-            f"🔗 {url}"
-        )
-        return
-
+    tmp_dir = tempfile.mkdtemp()
     try:
+        video_path = download_video(url, tmp_dir, is_instagram=is_instagram)
+
+        if not video_path:
+            err_hint = (
+                "Возможно пост приватный или Instagram заблокировал запрос."
+                if is_instagram else
+                "TikTok мог заблокировать запрос, попробуйте позже."
+            )
+            await status.edit_text(f"❌ Не удалось скачать видео.\n{err_hint}\n🔗 {url}")
+            return
+
+        size_mb = os.path.getsize(video_path) / 1024 / 1024
+
+        if size_mb > 50:
+            await status.edit_text(
+                f"⚠️ Видео слишком большое ({size_mb:.0f} МБ).\n"
+                f"Telegram-боты не могут отправлять файлы > 50 МБ.\n"
+                f"🔗 {url}"
+            )
+            return
+
         await status.edit_text("📤 Отправляю...")
         with open(video_path, "rb") as f:
             await message.reply_video(
@@ -125,12 +125,14 @@ async def process_url(message, url: str, is_instagram: bool):
                 supports_streaming=True,
             )
         await status.delete()
+
     except Exception as e:
         log.error(f"Ошибка отправки: {e}")
         await status.edit_text(f"❌ Ошибка при отправке видео: {e}")
     finally:
-        if os.path.exists(video_path):
-            os.unlink(video_path)
+        # Гарантированно удаляем всю временную папку со всем содержимым
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        log.info(f"Временная папка удалена: {tmp_dir}")
 
 # ─── ОБРАБОТЧИК СООБЩЕНИЙ ──────────────────────────────────────────────────────
 
