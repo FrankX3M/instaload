@@ -106,6 +106,39 @@ def admin_quality_keyboard(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+# ─── КОМАНДА /start ────────────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = get_message(update)
+    if not message:
+        return
+
+    from_user = message.from_user
+    is_adm = from_user and is_admin(from_user.id)
+
+    admin_section = (
+        "\n\n🔑 <b>Панель администратора:</b>"
+        "\n/caption — управление подписью под видео"
+        if is_adm else ""
+    )
+
+    await message.reply_text(
+        "👋 <b>Привет! Я умею скачивать видео.</b>\n\n"
+        "Просто отправь ссылку — получишь видео прямо в чат.\n\n"
+        "📱 <b>Поддерживаемые платформы:</b>\n"
+        "• Instagram — Reels, посты, IGTV\n"
+        "• TikTok — обычные и короткие видео\n"
+        "• YouTube — видео и Shorts\n\n"
+        "⚙️ <b>Команды:</b>\n"
+        "/quality — выбрать качество YouTube\n"
+        "           (360p / 480p / 720p / 1080p)\n"
+        "/start — показать это сообщение"
+        f"{admin_section}\n\n"
+        "⚠️ Максимальный размер файла — 50 МБ.",
+        parse_mode="HTML",
+    )
+
+
 # ─── КОМАНДА /caption ──────────────────────────────────────────────────────────
 
 async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -429,6 +462,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     await app.bot.set_my_commands([
+        BotCommand("start",   "О боте и список команд"),
         BotCommand("caption", "Показать / изменить подпись под видео"),
         BotCommand("quality",  "Качество YouTube: 360 / 480 / 720 / 1080p"),
         BotCommand("cancel",   "Отменить ввод подписи"),
@@ -456,6 +490,7 @@ def main():
         .build()
     )
 
+    app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("caption", cmd_caption))
     app.add_handler(CommandHandler("quality",  cmd_quality))
     app.add_handler(CommandHandler("cancel",   cmd_cancel))
