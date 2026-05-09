@@ -3,6 +3,14 @@ Telegram-бот для загрузки Instagram Reels, TikTok и YouTube ви�
 Установка:
     pip install python-telegram-bot yt-dlp
 
+Переменные окружения:
+    BOT_TOKEN    — токен бота от @BotFather
+    ADMIN_ID     — Telegram user_id администратора (только он может менять подпись)
+    IG_USERNAME  — логин Instagram (опционально)
+    IG_PASSWORD  — пароль Instagram (опционально)
+
+Узнать свой user_id: написать боту @userinfobot
+
 Запуск:
     python instagram_bot.py
 """
@@ -16,11 +24,19 @@ import yt_dlp
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 
-# ─── НАСТРОЙКИ (из переменных окружения или .env) ──────────────────────────────
+# ─── НАСТРОЙКИ ─────────────────────────────────────────────────────────────────
 
 BOT_TOKEN   = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ЗДЕСЬ")
 IG_USERNAME = os.environ.get("IG_USERNAME", "")
 IG_PASSWORD = os.environ.get("IG_PASSWORD", "")
+
+# ADMIN_ID — числовой Telegram ID администратора.
+# Узнать свой ID: написать @userinfobot в Telegram.
+_admin_id_raw = os.environ.get("ADMIN_ID", "")
+try:
+    ADMIN_ID: int | None = int(_admin_id_raw)
+except ValueError:
+    ADMIN_ID = None
 
 # ─── ЛОГИРОВАНИЕ ───────────────────────────────────────────────────────────────
 
@@ -54,44 +70,62 @@ YOUTUBE_QUALITIES = {
 }
 DEFAULT_YT_QUALITY = "720"
 
-# ─── ХРАНИЛИЩА (chat_id → значение) ───────────────────────────────────────────
+# ─── ХРАНИЛИЩА ────────────────────────────────────────────────────────────────
 # Хранятся в памяти; при перезапуске бота сбрасываются.
 
-user_captions:   dict[int, str] = {}   # подпись под видео
-user_yt_quality: dict[int, str] = {}   # качество YouTube
+# Единая глобальная подпись, которую задаёт только админ.
+# Применяется ко всем чатам сразу.
+global_caption: str | None = None
+
+user_yt_quality: dict[int, str] = {}   # качество YouTube (chat_id → качество)
+
+# ─── ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
+
+def is_admin(user_id: int) -> bool:
+    """Возвращает True если пользователь является администратором."""
+    return ADMIN_ID is not None and user_id == ADMIN_ID
+
 
 # ─── КОМАНДА /caption ──────────────────────────────────────────────────────────
 
 async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /caption <текст> — установить подпись под видео
-    /caption         — показать текущую подпись
-    /caption off     — убрать подпись совсем
+    Только для админа:
+        /caption <текст> — установить глобальную подпись под видео
+        /caption         — показать текущую подпись
+        /caption off     — убрать подпись совсем
     """
+    global global_caption
+
     message = update.message
-    chat_id = message.chat_id
+    user_id = message.from_user.id
     args = context.args
 
+    # Показать текущую подпись может любой (read-only)
     if not args:
-        current = user_captions.get(chat_id)
-        if current:
-            await message.reply_text(f"📝 Текущая подпись:\n{current}")
+        if global_caption:
+            await message.reply_text(f"📝 Текущая подпись:\n{global_caption}")
         else:
-            await message.reply_text(
-                "📝 Подпись не задана — видео отправляется без подписи.\n"
-                "Используй /caption <текст> чтобы задать подпись."
-            )
+            await message.reply_text("📝 Подпись не задана — видео отправляется без подписи.")
+        return
+
+    # Изменение — только для админа
+    if not is_admin(user_id):
+        await message.reply_text("🚫 Только администратор может менять подпись.")
+        log.warning(f"Попытка изменить подпись от user_id={user_id} (не админ)")
         return
 
     text = " ".join(args)
 
     if text.lower() == "off":
-        user_captions.pop(chat_id, None)
+        global_caption = None
         await message.reply_text("✅ Подпись убрана — видео будет отправляться без подписи.")
+        log.info(f"Подпись убрана (admin={user_id})")
         return
 
-    user_captions[chat_id] = text
+    global_caption = text
     await message.reply_text(f"✅ Подпись установлена:\n{text}")
+    log.info(f"Подпись изменена (admin={user_id}): {text}")
 
 
 # ─── КОМАНДА /quality ──────────────────────────────────────────────────────────
@@ -169,7 +203,6 @@ def download_video(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFA
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
 
-            # Если расширение изменилось после merge
             if not os.path.exists(filename):
                 filename = filename.rsplit(".", 1)[0] + ".mp4"
 
@@ -275,7 +308,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ig_urls and not tt_urls and not yt_urls:
         return
 
-    caption    = user_captions.get(message.chat_id)
+    # Глобальная подпись от админа (одна для всех чатов)
+    caption    = global_caption
     yt_quality = user_yt_quality.get(message.chat_id, DEFAULT_YT_QUALITY)
 
     for url in ig_urls:
@@ -296,6 +330,13 @@ def main():
         print("   Получите токен у @BotFather в Telegram")
         return
 
+    if ADMIN_ID is None:
+        print("⚠️  ADMIN_ID не задан или не является числом.")
+        print("   Команда /caption будет недоступна для изменения подписи.")
+        print("   Узнать свой ID: написать @userinfobot в Telegram.")
+    else:
+        print(f"🔑 Администратор: {ADMIN_ID}")
+
     print("🤖 Бот запускается...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -304,7 +345,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("✅ Бот работает! Поддерживает Instagram, TikTok и YouTube.")
-    print("   /caption <текст> | /caption off       — подпись под видео")
+    print("   /caption <текст> | /caption off       — подпись (только админ)")
     print("   /quality <360|480|720|1080>            — качество YouTube (по умолч. 720p)")
     app.run_polling(drop_pending_updates=True)
 
