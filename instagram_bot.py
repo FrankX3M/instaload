@@ -374,22 +374,16 @@ async def process_url(
         await status.delete()
 
         # ── Чистим исходное сообщение только после успешной отправки ──────────
-        # Telegram не позволяет редактировать чужие сообщения,
-        # поэтому удаляем оригинал и при наличии текста отправляем его от бота.
-        if link_only or extra_text:
+        # Удаляем только если сообщение состоит из одной ссылки без текста
+        # и не является reply на другое сообщение (иначе остаётся плашка "Удалённое сообщение").
+        # Если есть текст — не трогаем, т.к. редактировать чужие сообщения нельзя.
+        is_reply = message.reply_to_message is not None
+        if link_only and not is_reply:
             try:
                 await message.delete()
                 log.info(f"Исходное сообщение удалено (chat={message.chat_id})")
             except Exception as e:
                 log.warning(f"Не удалось удалить сообщение: {e} (бот не админ?)")
-
-            # Если в сообщении был текст помимо ссылки — отправляем его отдельно
-            if extra_text:
-                try:
-                    await message.chat.send_message(extra_text)
-                    log.info(f"Текст из сообщения переотправлен (chat={message.chat_id})")
-                except Exception as e:
-                    log.warning(f"Не удалось отправить текст: {e}")
 
         return True
 
