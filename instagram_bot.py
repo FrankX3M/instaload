@@ -73,8 +73,6 @@ DEFAULT_YT_QUALITY = "720"
 
 global_caption: str | None = None
 user_yt_quality: dict[int, str] = {}
-
-# Ожидаем ввод новой подписи от админа (chat_id → True)
 waiting_for_caption: set[int] = set()
 
 # ─── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
@@ -88,16 +86,13 @@ def get_message(update: Update):
 
 
 def admin_caption_keyboard() -> InlineKeyboardMarkup:
-    """Инлайн-меню управления подписью для админа."""
-    buttons = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Изменить подпись", callback_data="caption_edit")],
         [InlineKeyboardButton("🗑 Убрать подпись",   callback_data="caption_off")],
-    ]
-    return InlineKeyboardMarkup(buttons)
+    ])
 
 
 def admin_quality_keyboard(current: str) -> InlineKeyboardMarkup:
-    """Инлайн-меню выбора качества YouTube."""
     buttons = []
     row = []
     for q in YOUTUBE_QUALITIES:
@@ -114,6 +109,7 @@ def admin_quality_keyboard(current: str) -> InlineKeyboardMarkup:
 # ─── КОМАНДА /caption ──────────────────────────────────────────────────────────
 
 async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global global_caption
     message = get_message(update)
     if not message:
         return
@@ -121,20 +117,18 @@ async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from_user = message.from_user
     args = context.args
 
-    # ── Изменение через аргументы: /caption <текст> или /caption off ───────────
     if args:
         if not from_user or not is_admin(from_user.id):
             await message.reply_text("🚫 Только администратор может менять подпись.")
             return
-
         await _apply_caption(message, " ".join(args), from_user.id)
         return
 
-    # ── Просмотр без аргументов ────────────────────────────────────────────────
-    caption_text = f"📝 Текущая подпись:\n<b>{global_caption}</b>" if global_caption \
-                   else "📝 Подпись <b>не задана</b> — видео отправляется без подписи."
+    caption_text = (
+        f"📝 Текущая подпись:\n<b>{global_caption}</b>" if global_caption
+        else "📝 Подпись <b>не задана</b> — видео отправляется без подписи."
+    )
 
-    # Админу показываем кнопки управления
     if from_user and is_admin(from_user.id):
         await message.reply_text(
             caption_text + "\n\nВыбери действие:",
@@ -168,7 +162,6 @@ async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     current = user_yt_quality.get(chat_id, DEFAULT_YT_QUALITY)
 
-    # Изменение через аргумент: /quality 480
     if args:
         q = args[0].strip().rstrip("p")
         if q not in YOUTUBE_QUALITIES:
@@ -182,7 +175,6 @@ async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"✅ Качество YouTube установлено: {q}p{warn}")
         return
 
-    # Без аргументов — показываем кнопки
     await message.reply_text(
         f"🎬 Текущее качество YouTube: <b>{current}p</b>\n\n"
         f"⚠️ Telegram не принимает файлы > 50 МБ.\n"
@@ -191,6 +183,20 @@ async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=admin_quality_keyboard(current),
         parse_mode="HTML",
     )
+
+
+# ─── КОМАНДА /cancel ───────────────────────────────────────────────────────────
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = get_message(update)
+    if not message:
+        return
+    chat_id = message.chat_id
+    if chat_id in waiting_for_caption:
+        waiting_for_caption.discard(chat_id)
+        await message.reply_text("❌ Ввод подписи отменён.")
+    else:
+        await message.reply_text("Нечего отменять.")
 
 
 # ─── ОБРАБОТЧИК ИНЛАЙН-КНОПОК ─────────────────────────────────────────────────
@@ -203,7 +209,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
     data = query.data
 
-    # ── Кнопки подписи (только админ) ─────────────────────────────────────────
     if data.startswith("caption_"):
         if not is_admin(user_id):
             await query.answer("🚫 Только администратор.", show_alert=True)
@@ -222,7 +227,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Для отмены напиши /cancel"
             )
 
-    # ── Кнопки качества YouTube ────────────────────────────────────────────────
     elif data.startswith("quality_"):
         q = data.split("_")[1]
         if q not in YOUTUBE_QUALITIES:
@@ -233,20 +237,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Качество YouTube установлено: <b>{q}p</b>{warn}",
             parse_mode="HTML",
         )
-
-
-# ─── КОМАНДА /cancel ───────────────────────────────────────────────────────────
-
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = get_message(update)
-    if not message:
-        return
-    chat_id = message.chat_id
-    if chat_id in waiting_for_caption:
-        waiting_for_caption.discard(chat_id)
-        await message.reply_text("❌ Ввод подписи отменён.")
-    else:
-        await message.reply_text("Нечего отменять.")
 
 
 # ─── СКАЧИВАНИЕ ────────────────────────────────────────────────────────────────
@@ -266,11 +256,9 @@ def download_video(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFA
         if IG_USERNAME and IG_PASSWORD:
             ydl_opts["username"] = IG_USERNAME
             ydl_opts["password"] = IG_PASSWORD
-
     elif platform == "tiktok":
         ydl_opts["format"] = "best[ext=mp4]/best"
         ydl_opts["extractor_args"] = {"tiktok": {"webpage_download": ["1"]}}
-
     elif platform == "youtube":
         ydl_opts["format"] = YOUTUBE_QUALITIES.get(yt_quality, YOUTUBE_QUALITIES[DEFAULT_YT_QUALITY])
 
@@ -300,7 +288,22 @@ PLATFORM_META = {
     "youtube":   {"label": "YouTube",   "hint": "Видео могло быть удалено, приватным или заблокировано по региону."},
 }
 
-async def process_url(message, url: str, platform: str, caption: str | None, yt_quality: str = DEFAULT_YT_QUALITY):
+
+async def process_url(
+    message,
+    url: str,
+    platform: str,
+    caption: str | None,
+    yt_quality: str = DEFAULT_YT_QUALITY,
+    link_only: bool = False,
+    extra_text: str = "",
+) -> bool:
+    """
+    Скачивает и отправляет видео. После успешной отправки:
+      - link_only=True  → удаляет исходное сообщение (было только ссылка)
+      - extra_text != "" → редактирует сообщение, оставляя только текст без ссылки
+    Возвращает True если видео успешно отправлено.
+    """
     meta = PLATFORM_META[platform]
     log.info(f"[{meta['label']}] Обрабатываю: {url}")
 
@@ -315,7 +318,7 @@ async def process_url(message, url: str, platform: str, caption: str | None, yt_
             await status.edit_text(
                 f"❌ Не удалось скачать видео.\n{meta['hint']}\n🔗 {url}"
             )
-            return
+            return False
 
         size_mb = os.path.getsize(video_path) / 1024 / 1024
 
@@ -326,7 +329,7 @@ async def process_url(message, url: str, platform: str, caption: str | None, yt_
                 f"Telegram-боты не могут отправлять файлы > 50 МБ.{tip}\n"
                 f"🔗 {url}"
             )
-            return
+            return False
 
         await status.edit_text("📤 Отправляю...")
         with open(video_path, "rb") as f:
@@ -337,9 +340,28 @@ async def process_url(message, url: str, platform: str, caption: str | None, yt_
             )
         await status.delete()
 
+        # ── Чистим исходное сообщение только после успешной отправки ──────────
+        if link_only:
+            # Сообщение было только ссылкой — удаляем целиком
+            try:
+                await message.delete()
+                log.info(f"Исходное сообщение удалено (chat={message.chat_id})")
+            except Exception as e:
+                log.warning(f"Не удалось удалить сообщение: {e} (бот не админ?)")
+        elif extra_text:
+            # В сообщении был текст помимо ссылки — оставляем только текст
+            try:
+                await message.edit_text(extra_text)
+                log.info(f"Ссылка убрана из сообщения, текст сохранён (chat={message.chat_id})")
+            except Exception as e:
+                log.warning(f"Не удалось отредактировать сообщение: {e}")
+
+        return True
+
     except Exception as e:
         log.error(f"Ошибка отправки [{platform}]: {e}")
         await status.edit_text(f"❌ Ошибка при отправке видео: {e}")
+        return False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         log.info(f"Временная папка удалена: {tmp_dir}")
@@ -375,15 +397,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ig_urls and not tt_urls and not yt_urls:
         return
 
+    # Вычисляем текст без ссылок
+    all_urls = ig_urls + tt_urls + yt_urls
+    text_without_urls = text
+    for url in all_urls:
+        text_without_urls = text_without_urls.replace(url, "")
+    text_without_urls = text_without_urls.strip()
+
+    # link_only=True  → сообщение было только ссылкой, удалим после скачивания
+    # extra_text != "" → в сообщении был текст, отредактируем после скачивания
+    link_only  = not text_without_urls
+    extra_text = text_without_urls
+
     caption    = global_caption
     yt_quality = user_yt_quality.get(chat_id, DEFAULT_YT_QUALITY)
 
     for url in ig_urls:
-        await process_url(message, url, platform="instagram", caption=caption)
+        await process_url(message, url, platform="instagram", caption=caption,
+                          link_only=link_only, extra_text=extra_text)
     for url in tt_urls:
-        await process_url(message, url, platform="tiktok", caption=caption)
+        await process_url(message, url, platform="tiktok", caption=caption,
+                          link_only=link_only, extra_text=extra_text)
     for url in yt_urls:
-        await process_url(message, url, platform="youtube", caption=caption, yt_quality=yt_quality)
+        await process_url(message, url, platform="youtube", caption=caption,
+                          yt_quality=yt_quality, link_only=link_only, extra_text=extra_text)
 
 
 # ─── ЗАПУСК ────────────────────────────────────────────────────────────────────
