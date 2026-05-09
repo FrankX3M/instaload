@@ -4,7 +4,8 @@ services:
     restart: always
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID:-}
       - IG_USERNAME=${IG_USERNAME:-}
       - IG_PASSWORD=${IG_PASSWORD:-}
     volumes:
-      - /tmp/bot_videos:/tmp  # временные видеофайлы вне контейнера
+      - /tmp/bot_videos:/tmp
