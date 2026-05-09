@@ -21,7 +21,7 @@ import shutil
 import tempfile
 import logging
 import yt_dlp
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 
 # ─── НАСТРОЙКИ ─────────────────────────────────────────────────────────────────
@@ -30,8 +30,6 @@ BOT_TOKEN   = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ЗДЕСЬ")
 IG_USERNAME = os.environ.get("IG_USERNAME", "")
 IG_PASSWORD = os.environ.get("IG_PASSWORD", "")
 
-# ADMIN_ID — числовой Telegram ID администратора.
-# Узнать свой ID: написать @userinfobot в Telegram.
 _admin_id_raw = os.environ.get("ADMIN_ID", "")
 try:
     ADMIN_ID: int | None = int(_admin_id_raw)
@@ -46,7 +44,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── ПАТТЕРНЫ ДЛЯ ПОИСКА ССЫЛОК ────────────────────────────────────────────────
+# ─── ПАТТЕРНЫ ──────────────────────────────────────────────────────────────────
 
 INSTAGRAM_PATTERN = re.compile(
     r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+/?(?:\?[^\s]*)?"
@@ -60,7 +58,7 @@ YOUTUBE_PATTERN = re.compile(
     r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?(?:[^&\s]+&)*v=|shorts/|embed/)|youtu\.be/)[A-Za-z0-9_-]+(?:[&?][^\s]*)?"
 )
 
-# ─── ДОПУСТИМЫЕ КАЧЕСТВА ДЛЯ YOUTUBE ──────────────────────────────────────────
+# ─── КАЧЕСТВО YOUTUBE ──────────────────────────────────────────────────────────
 
 YOUTUBE_QUALITIES = {
     "360":  "best[height<=360][ext=mp4]/best[height<=360]",
@@ -70,38 +68,39 @@ YOUTUBE_QUALITIES = {
 }
 DEFAULT_YT_QUALITY = "720"
 
-# ─── ХРАНИЛИЩА ────────────────────────────────────────────────────────────────
-# Хранятся в памяти; при перезапуске бота сбрасываются.
+# ─── ХРАНИЛИЩА ─────────────────────────────────────────────────────────────────
 
-# Единая глобальная подпись, которую задаёт только админ.
-# Применяется ко всем чатам сразу.
-global_caption: str | None = None
+global_caption: str | None = None        # единая подпись, задаёт только админ
+user_yt_quality: dict[int, str] = {}     # качество YouTube (chat_id → качество)
 
-user_yt_quality: dict[int, str] = {}   # качество YouTube (chat_id → качество)
-
-# ─── ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ───────────────────────────────────────────────────
+# ─── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
 
 def is_admin(user_id: int) -> bool:
-    """Возвращает True если пользователь является администратором."""
     return ADMIN_ID is not None and user_id == ADMIN_ID
+
+
+def get_message(update: Update):
+    """Возвращает message из любого типа апдейта."""
+    return update.message or update.channel_post
 
 
 # ─── КОМАНДА /caption ──────────────────────────────────────────────────────────
 
 async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Только для админа:
-        /caption <текст> — установить глобальную подпись под видео
-        /caption         — показать текущую подпись
-        /caption off     — убрать подпись совсем
+    /caption         — показать текущую подпись (доступно всем)
+    /caption <текст> — установить подпись (только админ)
+    /caption off     — убрать подпись (только админ)
     """
     global global_caption
 
-    message = update.message
-    user_id = message.from_user.id
+    message = get_message(update)
+    if not message:
+        return
+
     args = context.args
 
-    # Показать текущую подпись может любой (read-only)
+    # Просмотр — доступен всем
     if not args:
         if global_caption:
             await message.reply_text(f"📝 Текущая подпись:\n{global_caption}")
@@ -109,10 +108,12 @@ async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("📝 Подпись не задана — видео отправляется без подписи.")
         return
 
-    # Изменение — только для админа
-    if not is_admin(user_id):
+    # Изменение — только админ
+    from_user = message.from_user
+    if not from_user or not is_admin(from_user.id):
         await message.reply_text("🚫 Только администратор может менять подпись.")
-        log.warning(f"Попытка изменить подпись от user_id={user_id} (не админ)")
+        if from_user:
+            log.warning(f"Попытка изменить подпись от user_id={from_user.id} (не админ)")
         return
 
     text = " ".join(args)
@@ -120,12 +121,12 @@ async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.lower() == "off":
         global_caption = None
         await message.reply_text("✅ Подпись убрана — видео будет отправляться без подписи.")
-        log.info(f"Подпись убрана (admin={user_id})")
+        log.info(f"Подпись убрана (admin={from_user.id})")
         return
 
     global_caption = text
     await message.reply_text(f"✅ Подпись установлена:\n{text}")
-    log.info(f"Подпись изменена (admin={user_id}): {text}")
+    log.info(f"Подпись изменена (admin={from_user.id}): {text}")
 
 
 # ─── КОМАНДА /quality ──────────────────────────────────────────────────────────
@@ -133,15 +134,17 @@ async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /quality        — показать текущее качество YouTube
-    /quality 360    — скачивать в 360p
-    /quality 480    — скачивать в 480p
-    /quality 720    — скачивать в 720p (по умолчанию)
-    /quality 1080   — скачивать в 1080p (риск превысить 50 МБ!)
+    /quality 360    — 360p
+    /quality 480    — 480p
+    /quality 720    — 720p (по умолчанию)
+    /quality 1080   — 1080p (риск превысить 50 МБ!)
     """
-    message = update.message
+    message = get_message(update)
+    if not message:
+        return
+
     chat_id = message.chat_id
     args = context.args
-
     current = user_yt_quality.get(chat_id, DEFAULT_YT_QUALITY)
 
     if not args:
@@ -154,7 +157,7 @@ async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    q = args[0].strip().rstrip("p")  # принимаем и "720" и "720p"
+    q = args[0].strip().rstrip("p")
 
     if q not in YOUTUBE_QUALITIES:
         await message.reply_text(
@@ -168,14 +171,9 @@ async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(f"✅ Качество YouTube установлено: {q}p{warn}")
 
 
-# ─── СКАЧИВАНИЕ ЧЕРЕЗ YT-DLP ──────────────────────────────────────────────────
+# ─── СКАЧИВАНИЕ ────────────────────────────────────────────────────────────────
 
 def download_video(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFAULT_YT_QUALITY) -> str | None:
-    """
-    Скачивает видео через yt-dlp.
-    platform: "instagram" | "tiktok" | "youtube"
-    Возвращает путь к файлу или None.
-    """
     output_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
 
     ydl_opts = {
@@ -219,28 +217,24 @@ def download_video(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFA
     return None
 
 
-# ─── ОБЩАЯ ЛОГИКА ОТПРАВКИ ─────────────────────────────────────────────────────
+# ─── ОТПРАВКА ──────────────────────────────────────────────────────────────────
 
 PLATFORM_META = {
     "instagram": {
         "label": "Instagram",
-        "icon":  "📸",
         "hint":  "Возможно пост приватный или Instagram заблокировал запрос.",
     },
     "tiktok": {
         "label": "TikTok",
-        "icon":  "🎵",
         "hint":  "TikTok мог заблокировать запрос, попробуйте позже.",
     },
     "youtube": {
         "label": "YouTube",
-        "icon":  "▶️",
         "hint":  "Видео могло быть удалено, приватным или заблокировано по региону.",
     },
 }
 
 async def process_url(message, url: str, platform: str, caption: str | None, yt_quality: str = DEFAULT_YT_QUALITY):
-    """Скачивает видео и отправляет в чат, гарантированно удаляет временные файлы."""
     meta = PLATFORM_META[platform]
     log.info(f"[{meta['label']}] Обрабатываю: {url}")
 
@@ -290,13 +284,12 @@ async def process_url(message, url: str, platform: str, caption: str | None, yt_
 # ─── ОБРАБОТЧИК СООБЩЕНИЙ ──────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    message = get_message(update)
     if not message or not message.text:
         return
 
     text = message.text.strip()
 
-    # ─── "да" → "пизда" ────────────────────────────────────────────────────────
     if text.lower() == "да":
         await message.reply_text("пизда")
         return
@@ -308,7 +301,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ig_urls and not tt_urls and not yt_urls:
         return
 
-    # Глобальная подпись от админа (одна для всех чатов)
     caption    = global_caption
     yt_quality = user_yt_quality.get(message.chat_id, DEFAULT_YT_QUALITY)
 
@@ -324,6 +316,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── ЗАПУСК ────────────────────────────────────────────────────────────────────
 
+async def post_init(app):
+    """Регистрируем меню команд в Telegram после старта."""
+    await app.bot.set_my_commands([
+        BotCommand("caption", "Показать / изменить подпись под видео"),
+        BotCommand("quality",  "Качество YouTube: 360 / 480 / 720 / 1080p"),
+    ])
+    log.info("Меню команд зарегистрировано.")
+
+
 def main():
     if BOT_TOKEN == "ВАШ_ТОКЕН_ЗДЕСЬ":
         print("❌ Укажите BOT_TOKEN!")
@@ -331,14 +332,19 @@ def main():
         return
 
     if ADMIN_ID is None:
-        print("⚠️  ADMIN_ID не задан или не является числом.")
-        print("   Команда /caption будет недоступна для изменения подписи.")
+        print("⚠️  ADMIN_ID не задан — смена подписи недоступна.")
         print("   Узнать свой ID: написать @userinfobot в Telegram.")
     else:
         print(f"🔑 Администратор: {ADMIN_ID}")
 
     print("🤖 Бот запускается...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("caption", cmd_caption))
     app.add_handler(CommandHandler("quality",  cmd_quality))
