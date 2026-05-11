@@ -1,15 +1,25 @@
 """
 Telegram-бот для загрузки Instagram Reels/Posts, TikTok и YouTube видео через yt-dlp
 Установка:
-    pip install python-telegram-bot yt-dlp
+    pip install python-telegram-bot yt-dlp instaloader
 
 Переменные окружения:
-    BOT_TOKEN    — токен бота от @BotFather
-    ADMIN_ID     — Telegram user_id администратора (только он может менять подпись)
-    IG_USERNAME  — логин Instagram (опционально)
-    IG_PASSWORD  — пароль Instagram (опционально)
+    BOT_TOKEN      — токен бота от @BotFather
+    ADMIN_ID       — Telegram user_id администратора (только он может менять подпись)
+    IG_COOKIES     — путь к файлу cookies Instagram в формате Netscape (рекомендуется)
+    IG_USERNAME    — логин Instagram (устаревший способ, работает нестабильно)
+    IG_PASSWORD    — пароль Instagram (устаревший способ, работает нестабильно)
 
 Узнать свой user_id: написать боту @userinfobot
+
+Как получить cookies (рекомендуемый способ):
+    1. Установите расширение «Get cookies.txt LOCALLY» для Chrome/Firefox
+    2. Зайдите на instagram.com в браузере под своим аккаунтом
+    3. Нажмите на расширение → Export cookies → сохраните файл как instagram_cookies.txt
+    4. Укажите путь: IG_COOKIES=/path/to/instagram_cookies.txt
+
+    Или через yt-dlp напрямую:
+        yt-dlp --cookies-from-browser chrome --cookies instagram_cookies.txt https://www.instagram.com/p/XXXX/
 
 Запуск:
     python instagram_bot.py
@@ -22,6 +32,7 @@ import shutil
 import tempfile
 import logging
 import yt_dlp
+import instaloader
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, CommandHandler,
@@ -31,6 +42,7 @@ from telegram.ext import (
 # ─── НАСТРОЙКИ ─────────────────────────────────────────────────────────────────
 
 BOT_TOKEN   = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ЗДЕСЬ")
+IG_COOKIES  = os.environ.get("IG_COOKIES", "instagram_cookies.txt")   # путь к файлу cookies
 IG_USERNAME = os.environ.get("IG_USERNAME", "")
 IG_PASSWORD = os.environ.get("IG_PASSWORD", "")
 
@@ -150,6 +162,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_adm else ""
     )
 
+    ig_cookies_status = (
+        f"✅ Cookies: <code>{IG_COOKIES}</code>"
+        if IG_COOKIES and os.path.isfile(IG_COOKIES)
+        else "⚠️ Cookies Instagram не найдены — публичные посты могут не скачиваться"
+    )
+
     await message.reply_text(
         "👋 <b>Привет! Я умею скачивать видео и фото.</b>\n\n"
         "Просто отправь ссылку — получишь медиа прямо в чат.\n\n"
@@ -157,6 +175,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Instagram — Reels, посты (фото/карусели), IGTV\n"
         "• TikTok — обычные и короткие видео\n"
         "• YouTube — видео и Shorts\n\n"
+        f"{ig_cookies_status}\n\n"
+        "🍪 <b>Как настроить cookies Instagram:</b>\n"
+        "1. Установи расширение <b>«Get cookies.txt LOCALLY»</b>\n"
+        "   (Chrome / Firefox)\n"
+        "2. Войди на instagram.com в браузере\n"
+        "3. Нажми расширение → <b>Export cookies</b>\n"
+        "4. Сохрани файл как <code>instagram_cookies.txt</code>\n"
+        "   рядом с ботом (или укажи путь в <code>IG_COOKIES</code>)\n\n"
         "⚙️ <b>Команды:</b>\n"
         "/quality — выбрать качество YouTube\n"
         "           (360p / 480p / 720p / 1080p)\n"
@@ -321,13 +347,26 @@ def download_media(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFA
     }
 
     if platform == "instagram":
-        # Для фото: write_all_thumbnails=False, но сам yt-dlp скачает фото как .jpg
-        # Для видео/reels: скачает mp4
-        # write_pages=False чтобы не засорять папку
         ydl_opts["format"] = "best[ext=mp4]/best"
-        if IG_USERNAME and IG_PASSWORD:
+        # Cookies — самый надёжный способ авторизации в Instagram
+        if IG_COOKIES and os.path.isfile(IG_COOKIES):
+            ydl_opts["cookiefile"] = IG_COOKIES
+            log.info(f"Instagram: используем cookies из {IG_COOKIES}")
+        elif IG_USERNAME and IG_PASSWORD:
+            # Устаревший способ — Instagram часто его блокирует
             ydl_opts["username"] = IG_USERNAME
             ydl_opts["password"] = IG_PASSWORD
+            log.info("Instagram: используем логин/пароль (нестабильно)")
+        else:
+            log.warning("Instagram: cookies не найдены, скачивание публичных постов может не работать")
+        # User-Agent реального браузера снижает вероятность блокировки
+        ydl_opts["http_headers"] = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            )
+        }
 
     elif platform == "tiktok":
         ydl_opts["format"] = "best[ext=mp4]/best"
@@ -366,10 +405,82 @@ def download_media(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFA
     return []
 
 
+def _shortcode_from_url(url: str) -> str | None:
+    """Извлекает shortcode поста из URL Instagram."""
+    m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
+    return m.group(1) if m else None
+
+
+def download_instagram_photos(url: str, tmp_dir: str) -> list[str]:
+    """
+    Скачивает фото/карусель из Instagram через instaloader.
+    Возвращает список путей к jpg-файлам (отсортированных по порядку).
+    Пустой список — ошибка или пост не является фото.
+    """
+    shortcode = _shortcode_from_url(url)
+    if not shortcode:
+        log.error(f"instaloader: не удалось извлечь shortcode из {url}")
+        return []
+
+    try:
+        L = instaloader.Instaloader(
+            dirname_pattern=tmp_dir,
+            filename_pattern="{shortcode}_{mediaid}",
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+            post_metadata_txt_pattern="",
+            quiet=True,
+        )
+
+        # Авторизация через cookies-файл если доступен
+        if IG_COOKIES and os.path.isfile(IG_COOKIES):
+            try:
+                L.load_session_from_file(IG_USERNAME or "user", IG_COOKIES)
+                log.info("instaloader: сессия загружена из cookies")
+            except Exception:
+                pass  # продолжаем без авторизации
+
+        # Авторизация через логин/пароль
+        if not L.context.is_logged_in and IG_USERNAME and IG_PASSWORD:
+            try:
+                L.login(IG_USERNAME, IG_PASSWORD)
+                log.info(f"instaloader: авторизован как {IG_USERNAME}")
+            except Exception as e:
+                log.warning(f"instaloader: не удалось войти: {e}")
+
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+
+        # Если пост видео — instaloader не нужен, вернём пустой список
+        # чтобы не дублировать скачивание (yt-dlp уже справился)
+        if post.is_video and not post.typename == "GraphSidecar":
+            log.info("instaloader: пост является видео, пропускаем")
+            return []
+
+        L.download_post(post, target=tmp_dir)
+
+        # Собираем только jpg (не mp4, не txt)
+        files = sorted(glob.glob(os.path.join(tmp_dir, "*.jpg")))
+        # Если карусель содержит видео, добавим и их
+        files += sorted(glob.glob(os.path.join(tmp_dir, "*.mp4")))
+
+        if files:
+            log.info(f"instaloader: скачано {len(files)} файл(ов): {files}")
+        return files
+
+    except instaloader.exceptions.InstaloaderException as e:
+        log.error(f"instaloader ошибка: {e}")
+    except Exception as e:
+        log.error(f"instaloader неожиданная ошибка: {e}")
+
+    return []
+
+
 # ─── ОТПРАВКА ──────────────────────────────────────────────────────────────────
 
 PLATFORM_META = {
-    "instagram": {"label": "Instagram", "hint": "Возможно пост приватный или Instagram заблокировал запрос."},
+    "instagram": {"label": "Instagram", "hint": "Возможно пост приватный или Instagram заблокировал запрос.\n💡 Для надёжной работы укажи cookies: см. /start"},
     "tiktok":    {"label": "TikTok",    "hint": "TikTok мог заблокировать запрос, попробуйте позже."},
     "youtube":   {"label": "YouTube",   "hint": "Видео могло быть удалено, приватным или заблокировано по региону."},
 }
@@ -456,6 +567,11 @@ async def process_url(
     tmp_dir = tempfile.mkdtemp()
     try:
         files = download_media(url, tmp_dir, platform=platform, yt_quality=yt_quality)
+
+        # Если yt-dlp не справился с Instagram — пробуем instaloader (фото/карусели)
+        if not files and platform == "instagram":
+            await status.edit_text("⏳ Пробую альтернативный способ (фото-пост)...")
+            files = download_instagram_photos(url, tmp_dir)
 
         if not files:
             await status.edit_text(
@@ -586,6 +702,14 @@ def main():
         print("   Узнать свой ID: написать @userinfobot в Telegram.")
     else:
         print(f"🔑 Администратор: {ADMIN_ID}")
+
+    if IG_COOKIES and os.path.isfile(IG_COOKIES):
+        print(f"🍪 Instagram cookies: {IG_COOKIES}")
+    elif IG_USERNAME:
+        print(f"🔐 Instagram логин: {IG_USERNAME} (нестабильно, лучше использовать cookies)")
+    else:
+        print("⚠️  Instagram cookies не найдены.")
+        print("   Создайте instagram_cookies.txt (см. /start в боте) для надёжной работы.")
 
     print("🤖 Бот запускается...")
 
