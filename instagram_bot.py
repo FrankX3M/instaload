@@ -1,5 +1,5 @@
 """
-Telegram-бот для загрузки Instagram Reels, TikTok и YouTube видео через yt-dlp
+Telegram-бот для загрузки Instagram Reels/Posts, TikTok и YouTube видео через yt-dlp
 Установка:
     pip install python-telegram-bot yt-dlp
 
@@ -17,11 +17,12 @@ Telegram-бот для загрузки Instagram Reels, TikTok и YouTube ви�
 
 import re
 import os
+import glob
 import shutil
 import tempfile
 import logging
 import yt_dlp
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, CommandHandler,
     CallbackQueryHandler, filters, ContextTypes
@@ -69,6 +70,12 @@ YOUTUBE_QUALITIES = {
 }
 DEFAULT_YT_QUALITY = "720"
 
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+# Telegram: максимум 10 медиа в одном альбоме
+MAX_ALBUM_SIZE = 10
+
 # ─── ХРАНИЛИЩА ─────────────────────────────────────────────────────────────────
 
 global_caption: str | None = None
@@ -106,6 +113,27 @@ def admin_quality_keyboard(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def classify_file(path: str) -> str:
+    """Возвращает 'video', 'photo' или 'unknown'."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_EXTENSIONS:
+        return "video"
+    if ext in PHOTO_EXTENSIONS:
+        return "photo"
+    return "unknown"
+
+
+def collect_media_files(tmp_dir: str) -> list[str]:
+    """Собирает все медиафайлы из папки, сортирует по имени (сохраняет порядок карусели)."""
+    files = []
+    for ext in list(VIDEO_EXTENSIONS) + list(PHOTO_EXTENSIONS):
+        files.extend(glob.glob(os.path.join(tmp_dir, f"*{ext}")))
+        files.extend(glob.glob(os.path.join(tmp_dir, f"*{ext.upper()}")))
+    # убираем дубли и сортируем
+    files = sorted(set(files))
+    return files
+
+
 # ─── КОМАНДА /start ────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,10 +151,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await message.reply_text(
-        "👋 <b>Привет! Я умею скачивать видео.</b>\n\n"
-        "Просто отправь ссылку — получишь видео прямо в чат.\n\n"
+        "👋 <b>Привет! Я умею скачивать видео и фото.</b>\n\n"
+        "Просто отправь ссылку — получишь медиа прямо в чат.\n\n"
         "📱 <b>Поддерживаемые платформы:</b>\n"
-        "• Instagram — Reels, посты, IGTV\n"
+        "• Instagram — Reels, посты (фото/карусели), IGTV\n"
         "• TikTok — обычные и короткие видео\n"
         "• YouTube — видео и Shorts\n\n"
         "⚙️ <b>Команды:</b>\n"
@@ -134,7 +162,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "           (360p / 480p / 720p / 1080p)\n"
         "/start — показать это сообщение"
         f"{admin_section}\n\n"
-        "⚠️ Максимальный размер файла — 50 МБ.",
+        "⚠️ Максимальный размер файла — 50 МБ.\n"
+        "📸 Карусели (до 10 фото/видео) отправляются одним альбомом.",
         parse_mode="HTML",
     )
 
@@ -159,7 +188,7 @@ async def cmd_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     caption_text = (
         f"📝 Текущая подпись:\n<b>{global_caption}</b>" if global_caption
-        else "📝 Подпись <b>не задана</b> — видео отправляется без подписи."
+        else "📝 Подпись <b>не задана</b> — медиа отправляется без подписи."
     )
 
     if from_user and is_admin(from_user.id):
@@ -176,7 +205,7 @@ async def _apply_caption(message, text: str, admin_id: int):
     global global_caption
     if text.lower() == "off":
         global_caption = None
-        await message.reply_text("✅ Подпись убрана — видео будет отправляться без подписи.")
+        await message.reply_text("✅ Подпись убрана — медиа будет отправляться без подписи.")
         log.info(f"Подпись убрана (admin={admin_id})")
     else:
         global_caption = text
@@ -250,7 +279,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "caption_off":
             global global_caption
             global_caption = None
-            await query.edit_message_text("✅ Подпись убрана — видео отправляется без подписи.")
+            await query.edit_message_text("✅ Подпись убрана — медиа отправляется без подписи.")
             log.info(f"Подпись убрана через кнопку (admin={user_id})")
 
         elif data == "caption_edit":
@@ -274,43 +303,67 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── СКАЧИВАНИЕ ────────────────────────────────────────────────────────────────
 
-def download_video(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFAULT_YT_QUALITY) -> str | None:
-    output_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
+def download_media(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFAULT_YT_QUALITY) -> list[str]:
+    """
+    Скачивает медиа по URL в tmp_dir.
+    Возвращает список путей к скачанным файлам (видео или фото).
+    Пустой список означает ошибку.
+    """
+    output_template = os.path.join(tmp_dir, "%(playlist_index)s_%(id)s.%(ext)s")
 
     ydl_opts = {
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
+        # Скачиваем все элементы карусели/плейлиста (для Instagram)
+        "noplaylist": False,
     }
 
     if platform == "instagram":
+        # Для фото: write_all_thumbnails=False, но сам yt-dlp скачает фото как .jpg
+        # Для видео/reels: скачает mp4
+        # write_pages=False чтобы не засорять папку
         ydl_opts["format"] = "best[ext=mp4]/best"
         if IG_USERNAME and IG_PASSWORD:
             ydl_opts["username"] = IG_USERNAME
             ydl_opts["password"] = IG_PASSWORD
+
     elif platform == "tiktok":
         ydl_opts["format"] = "best[ext=mp4]/best"
         ydl_opts["extractor_args"] = {"tiktok": {"webpage_download": ["1"]}}
+        ydl_opts["noplaylist"] = True
+
     elif platform == "youtube":
         ydl_opts["format"] = YOUTUBE_QUALITIES.get(yt_quality, YOUTUBE_QUALITIES[DEFAULT_YT_QUALITY])
+        ydl_opts["noplaylist"] = True
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            if not os.path.exists(filename):
-                filename = filename.rsplit(".", 1)[0] + ".mp4"
-            if os.path.exists(filename):
-                size_mb = os.path.getsize(filename) / 1024 / 1024
-                log.info(f"Скачано: {filename} ({size_mb:.1f} МБ)")
-                return filename
+
+            # Собираем все скачанные медиафайлы из папки
+            files = collect_media_files(tmp_dir)
+
+            if not files:
+                # Запасной вариант: попробуем имя из info
+                filename = ydl.prepare_filename(info)
+                if not os.path.exists(filename):
+                    filename = filename.rsplit(".", 1)[0] + ".mp4"
+                if os.path.exists(filename):
+                    files = [filename]
+
+            if files:
+                total_mb = sum(os.path.getsize(f) for f in files) / 1024 / 1024
+                log.info(f"Скачано {len(files)} файл(ов), суммарно {total_mb:.1f} МБ: {files}")
+            return files
+
     except yt_dlp.utils.DownloadError as e:
         log.error(f"yt-dlp ошибка [{platform}]: {e}")
     except Exception as e:
         log.error(f"Неожиданная ошибка [{platform}]: {e}")
 
-    return None
+    return []
 
 
 # ─── ОТПРАВКА ──────────────────────────────────────────────────────────────────
@@ -320,6 +373,64 @@ PLATFORM_META = {
     "tiktok":    {"label": "TikTok",    "hint": "TikTok мог заблокировать запрос, попробуйте позже."},
     "youtube":   {"label": "YouTube",   "hint": "Видео могло быть удалено, приватным или заблокировано по региону."},
 }
+
+
+async def send_media_files(message, files: list[str], caption: str | None):
+    """
+    Отправляет медиафайлы в чат:
+    - 1 видео → reply_video
+    - 1 фото  → reply_photo
+    - несколько файлов → reply_media_group (альбом, до 10 штук)
+    """
+    if not files:
+        return False
+
+    # Проверяем, нет ли слишком больших файлов
+    oversized = [f for f in files if os.path.getsize(f) / 1024 / 1024 > 50]
+    if oversized:
+        return "oversized"
+
+    # Один файл
+    if len(files) == 1:
+        path = files[0]
+        kind = classify_file(path)
+        with open(path, "rb") as f:
+            if kind == "video":
+                await message.reply_video(
+                    video=f,
+                    caption=caption or None,
+                    supports_streaming=True,
+                )
+            else:
+                # фото или неизвестный формат — шлём как фото
+                await message.reply_photo(
+                    photo=f,
+                    caption=caption or None,
+                )
+        return True
+
+    # Несколько файлов — альбом (Telegram принимает до 10)
+    chunks = [files[i:i + MAX_ALBUM_SIZE] for i in range(0, len(files), MAX_ALBUM_SIZE)]
+    for chunk_idx, chunk in enumerate(chunks):
+        media_group = []
+        open_files = []
+        try:
+            for idx, path in enumerate(chunk):
+                kind = classify_file(path)
+                f = open(path, "rb")
+                open_files.append(f)
+                # Подпись ставим только на первый элемент первого альбома
+                item_caption = caption if (chunk_idx == 0 and idx == 0) else None
+                if kind == "video":
+                    media_group.append(InputMediaVideo(media=f, caption=item_caption, supports_streaming=True))
+                else:
+                    media_group.append(InputMediaPhoto(media=f, caption=item_caption))
+            await message.reply_media_group(media=media_group)
+        finally:
+            for f in open_files:
+                f.close()
+
+    return True
 
 
 async def process_url(
@@ -332,64 +443,67 @@ async def process_url(
     extra_text: str = "",
 ) -> bool:
     """
-    Скачивает и отправляет видео. После успешной отправки:
+    Скачивает и отправляет медиа. После успешной отправки:
       - link_only=True  → удаляет исходное сообщение (было только ссылка)
-      - extra_text != "" → редактирует сообщение, оставляя только текст без ссылки
-    Возвращает True если видео успешно отправлено.
+    Возвращает True если медиа успешно отправлено.
     """
     meta = PLATFORM_META[platform]
     log.info(f"[{meta['label']}] Обрабатываю: {url}")
 
     quality_info = f" ({yt_quality}p)" if platform == "youtube" else ""
-    status = await message.reply_text(f"⏳ Скачиваю {meta['label']}{quality_info} видео...")
+    status = await message.reply_text(f"⏳ Скачиваю {meta['label']}{quality_info}...")
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        video_path = download_video(url, tmp_dir, platform=platform, yt_quality=yt_quality)
+        files = download_media(url, tmp_dir, platform=platform, yt_quality=yt_quality)
 
-        if not video_path:
+        if not files:
             await status.edit_text(
-                f"❌ Не удалось скачать видео.\n{meta['hint']}\n🔗 {url}"
+                f"❌ Не удалось скачать медиа.\n{meta['hint']}\n🔗 {url}"
             )
             return False
 
-        size_mb = os.path.getsize(video_path) / 1024 / 1024
-
-        if size_mb > 50:
+        # Проверяем размер до отправки
+        oversized = [f for f in files if os.path.getsize(f) / 1024 / 1024 > 50]
+        if oversized:
+            sizes = ", ".join(f"{os.path.getsize(f)/1024/1024:.0f} МБ" for f in oversized)
             tip = "\n💡 Попробуй уменьшить качество: /quality" if platform == "youtube" else ""
             await status.edit_text(
-                f"⚠️ Видео слишком большое ({size_mb:.0f} МБ).\n"
+                f"⚠️ Файл(ы) слишком большие ({sizes}).\n"
                 f"Telegram-боты не могут отправлять файлы > 50 МБ.{tip}\n"
                 f"🔗 {url}"
             )
             return False
 
-        await status.edit_text("📤 Отправляю...")
-        with open(video_path, "rb") as f:
-            await message.reply_video(
-                video=f,
-                caption=caption or None,
-                supports_streaming=True,
-            )
-        await status.delete()
+        count = len(files)
+        kinds = set(classify_file(f) for f in files)
+        if count > 1:
+            await status.edit_text(f"📤 Отправляю альбом ({count} файлов)...")
+        else:
+            await status.edit_text("📤 Отправляю...")
 
-        # ── Чистим исходное сообщение только после успешной отправки ──────────
-        # Удаляем только если сообщение состоит из одной ссылки без текста
-        # и не является reply на другое сообщение (иначе остаётся плашка "Удалённое сообщение").
-        # Если есть текст — не трогаем, т.к. редактировать чужие сообщения нельзя.
-        is_reply = message.reply_to_message is not None
-        if link_only and not is_reply:
-            try:
-                await message.delete()
-                log.info(f"Исходное сообщение удалено (chat={message.chat_id})")
-            except Exception as e:
-                log.warning(f"Не удалось удалить сообщение: {e} (бот не админ?)")
+        result = await send_media_files(message, files, caption)
 
-        return True
+        if result is True:
+            await status.delete()
+
+            # Удаляем исходное сообщение если оно было только ссылкой
+            is_reply = message.reply_to_message is not None
+            if link_only and not is_reply:
+                try:
+                    await message.delete()
+                    log.info(f"Исходное сообщение удалено (chat={message.chat_id})")
+                except Exception as e:
+                    log.warning(f"Не удалось удалить сообщение: {e} (бот не админ?)")
+
+            return True
+        else:
+            await status.edit_text(f"❌ Ошибка при отправке медиа.\n🔗 {url}")
+            return False
 
     except Exception as e:
         log.error(f"Ошибка отправки [{platform}]: {e}")
-        await status.edit_text(f"❌ Ошибка при отправке видео: {e}")
+        await status.edit_text(f"❌ Ошибка при отправке: {e}")
         return False
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -433,8 +547,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_without_urls = text_without_urls.replace(url, "")
     text_without_urls = text_without_urls.strip()
 
-    # link_only=True  → сообщение было только ссылкой, удалим после скачивания
-    # extra_text != "" → в сообщении был текст, отредактируем после скачивания
     link_only  = not text_without_urls
     extra_text = text_without_urls
 
@@ -457,7 +569,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start",   "О боте и список команд"),
-        BotCommand("caption", "Показать / изменить подпись под видео"),
+        BotCommand("caption", "Показать / изменить подпись под медиа"),
         BotCommand("quality",  "Качество YouTube: 360 / 480 / 720 / 1080p"),
         BotCommand("cancel",   "Отменить ввод подписи"),
     ])
@@ -491,7 +603,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("✅ Бот работает! Поддерживает Instagram, TikTok и YouTube.")
+    print("✅ Бот работает! Поддерживает Instagram (видео + фото + карусели), TikTok и YouTube.")
     app.run_polling(drop_pending_updates=True)
 
 
