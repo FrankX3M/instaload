@@ -146,6 +146,105 @@ def collect_media_files(tmp_dir: str) -> list[str]:
     return files
 
 
+# ─── НАРЕЗКА ВИДЕО ─────────────────────────────────────────────────────────────
+
+TG_MAX_MB = 50          # Telegram-лимит для ботов (МБ)
+PART_TARGET_MB = 45     # целевой размер части с запасом
+
+def get_video_duration(path: str) -> float | None:
+    """Возвращает длительность видео в секундах через ffprobe."""
+    import subprocess, json
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", path
+            ],
+            capture_output=True, text=True, timeout=30
+        )
+        info = json.loads(result.stdout)
+        return float(info["format"]["duration"])
+    except Exception as e:
+        log.error(f"ffprobe ошибка: {e}")
+        return None
+
+
+def split_video_by_size(path: str, tmp_dir: str) -> list[str]:
+    """
+    Нарезает видео на части, каждая ≤ PART_TARGET_MB МБ.
+    Использует ffmpeg без перекодирования (copy), быстро.
+    Возвращает список путей к частям; если нарезка не удалась — [path].
+    """
+    import subprocess
+
+    file_mb = os.path.getsize(path) / 1024 / 1024
+    if file_mb <= TG_MAX_MB:
+        return [path]
+
+    duration = get_video_duration(path)
+    if not duration:
+        log.warning(f"Не удалось получить длительность {path}, отправляю как есть")
+        return [path]
+
+    # Считаем сколько частей нужно
+    num_parts = int(file_mb / PART_TARGET_MB) + 1
+    part_duration = duration / num_parts
+
+    log.info(f"Видео {file_mb:.1f} МБ → нарезаю на {num_parts} части по ~{part_duration:.0f}с")
+
+    base = os.path.splitext(os.path.basename(path))[0]
+    parts = []
+
+    for i in range(num_parts):
+        start = i * part_duration
+        part_path = os.path.join(tmp_dir, f"{base}_part{i+1:02d}.mp4")
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start),
+            "-i", path,
+            "-t", str(part_duration),
+            "-c", "copy",           # без перекодирования — быстро
+            "-avoid_negative_ts", "1",
+            part_path
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+            if result.returncode == 0 and os.path.exists(part_path) and os.path.getsize(part_path) > 0:
+                part_mb = os.path.getsize(part_path) / 1024 / 1024
+                log.info(f"  Часть {i+1}: {part_mb:.1f} МБ → {part_path}")
+                parts.append(part_path)
+            else:
+                log.error(f"ffmpeg не создал часть {i+1}: {result.stderr.decode()[:300]}")
+        except subprocess.TimeoutExpired:
+            log.error(f"ffmpeg таймаут на части {i+1}")
+        except FileNotFoundError:
+            log.error("ffmpeg не найден! Установи: apt install ffmpeg")
+            return [path]
+
+    if not parts:
+        log.warning("Нарезка не удалась, возвращаю оригинал")
+        return [path]
+
+    return parts
+
+
+def prepare_files_for_sending(files: list[str], tmp_dir: str) -> list[str]:
+    """
+    Проверяет каждый файл и при необходимости нарезает большие видео на части.
+    Возвращает итоговый список файлов готовых к отправке.
+    """
+    result = []
+    for path in files:
+        file_mb = os.path.getsize(path) / 1024 / 1024
+        if file_mb > TG_MAX_MB and classify_file(path) == "video":
+            log.info(f"Файл {os.path.basename(path)} ({file_mb:.1f} МБ) > {TG_MAX_MB} МБ, нарезаю...")
+            parts = split_video_by_size(path, tmp_dir)
+            result.extend(parts)
+        else:
+            result.append(path)
+    return result
+
+
 # ─── КОМАНДА /start ────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,7 +287,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "           (360p / 480p / 720p / 1080p)\n"
         "/start — показать это сообщение"
         f"{admin_section}\n\n"
-        "⚠️ Максимальный размер файла — 50 МБ.\n"
+        "✂️ Большие видео (> 50 МБ) автоматически нарезаются на части.\n"
+        "   Для нарезки нужен <b>ffmpeg</b>: <code>apt install ffmpeg</code>\n"
         "📸 Карусели (до 10 фото/видео) отправляются одним альбомом.",
         parse_mode="HTML",
     )
@@ -579,22 +679,32 @@ async def process_url(
             )
             return False
 
-        # Проверяем размер до отправки
-        oversized = [f for f in files if os.path.getsize(f) / 1024 / 1024 > 50]
+        # Нарезаем большие видео на части если нужно
+        oversized = [f for f in files if os.path.getsize(f) / 1024 / 1024 > TG_MAX_MB]
         if oversized:
             sizes = ", ".join(f"{os.path.getsize(f)/1024/1024:.0f} МБ" for f in oversized)
-            tip = "\n💡 Попробуй уменьшить качество: /quality" if platform == "youtube" else ""
-            await status.edit_text(
-                f"⚠️ Файл(ы) слишком большие ({sizes}).\n"
-                f"Telegram-боты не могут отправлять файлы > 50 МБ.{tip}\n"
-                f"🔗 {url}"
-            )
-            return False
+            await status.edit_text(f"✂️ Видео слишком большое ({sizes}), нарезаю на части...")
+            files = prepare_files_for_sending(files, tmp_dir)
+            # Если после нарезки всё равно есть oversized (фото или нарезка не удалась)
+            still_oversized = [f for f in files if os.path.getsize(f) / 1024 / 1024 > TG_MAX_MB]
+            if still_oversized:
+                sizes2 = ", ".join(f"{os.path.getsize(f)/1024/1024:.0f} МБ" for f in still_oversized)
+                tip = "\n💡 Попробуй уменьшить качество: /quality" if platform == "youtube" else ""
+                await status.edit_text(
+                    f"⚠️ Не удалось разбить файл(ы) ({sizes2}).\n"
+                    f"Возможно, ffmpeg не установлен или произошла ошибка.{tip}\n"
+                    f"🔗 {url}"
+                )
+                return False
 
         count = len(files)
-        kinds = set(classify_file(f) for f in files)
         if count > 1:
-            await status.edit_text(f"📤 Отправляю альбом ({count} файлов)...")
+            # Определяем есть ли среди файлов части одного видео
+            has_parts = any("_part" in os.path.basename(f) for f in files)
+            if has_parts:
+                await status.edit_text(f"📤 Отправляю видео по частям ({count} шт.)...")
+            else:
+                await status.edit_text(f"📤 Отправляю альбом ({count} файлов)...")
         else:
             await status.edit_text("📤 Отправляю...")
 
