@@ -12,9 +12,6 @@ docker compose build --no-cache
 echo "🧹 Чистим мусор..."
 docker system prune -f
 
-# Also remove unused volumes if needed
-docker volume prune -f
-
 echo "🚀 Запускаем..."
 docker compose up -d
 
