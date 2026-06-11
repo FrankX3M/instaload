@@ -31,6 +31,8 @@ import glob
 import shutil
 import tempfile
 import logging
+import time
+import asyncio
 import yt_dlp
 import instaloader
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
@@ -84,6 +86,19 @@ DEFAULT_YT_QUALITY = "720"
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+# ─── ВРЕМЕННАЯ ПАПКА ДЛЯ ВИДЕО ────────────────────────────────────────────────
+# Используем отдельную поддиректорию внутри /tmp чтобы:
+# 1. Не мешать системному /tmp
+# 2. Иметь возможность чистить только наши файлы
+BOT_TMP_DIR = os.environ.get("BOT_TMP_DIR", "/tmp/bot_dl")
+os.makedirs(BOT_TMP_DIR, exist_ok=True)
+
+# Файлы старше этого времени (в секундах) считаются мусором от прошлых крэшей
+STALE_FILE_AGE_SEC = int(os.environ.get("STALE_FILE_AGE_SEC", str(60 * 30)))  # 30 минут
+
+# Интервал фоновой очистки
+CLEANUP_INTERVAL_SEC = int(os.environ.get("CLEANUP_INTERVAL_SEC", str(60 * 15)))  # каждые 15 минут
 
 # Telegram: максимум 10 медиа в одном альбоме
 MAX_ALBUM_SIZE = 10
@@ -664,7 +679,7 @@ async def process_url(
     quality_info = f" ({yt_quality}p)" if platform == "youtube" else ""
     status = await message.reply_text(f"⏳ Скачиваю {meta['label']}{quality_info}...")
 
-    tmp_dir = tempfile.mkdtemp()
+    tmp_dir = tempfile.mkdtemp(dir=BOT_TMP_DIR)
     try:
         files = download_media(url, tmp_dir, platform=platform, yt_quality=yt_quality)
 
@@ -790,6 +805,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                           yt_quality=yt_quality, link_only=link_only, extra_text=extra_text)
 
 
+# ─── ФОНОВАЯ ОЧИСТКА ───────────────────────────────────────────────────────────
+
+def cleanup_stale_tmp() -> tuple[int, float]:
+    """
+    Удаляет папки в BOT_TMP_DIR старше STALE_FILE_AGE_SEC секунд.
+    Это подчищает мусор от предыдущих крэшей бота.
+    Возвращает (количество удалённых папок, освобождённые МБ).
+    """
+    removed = 0
+    freed_bytes = 0
+    now = time.time()
+
+    try:
+        for entry in os.scandir(BOT_TMP_DIR):
+            if not entry.is_dir():
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+                if age > STALE_FILE_AGE_SEC:
+                    size = sum(
+                        f.stat().st_size
+                        for f in os.scandir(entry.path)
+                        if f.is_file()
+                    )
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                    freed_bytes += size
+                    removed += 1
+                    log.info(
+                        f"[cleanup] Удалена старая папка: {entry.name} "
+                        f"(возраст {age/60:.0f} мин, {size/1024/1024:.1f} МБ)"
+                    )
+            except Exception as e:
+                log.warning(f"[cleanup] Не удалось удалить {entry.path}: {e}")
+    except Exception as e:
+        log.error(f"[cleanup] Ошибка сканирования {BOT_TMP_DIR}: {e}")
+
+    return removed, freed_bytes / 1024 / 1024
+
+
+async def background_cleanup(interval: int = CLEANUP_INTERVAL_SEC):
+    """Фоновая задача — периодически чистит BOT_TMP_DIR."""
+    log.info(f"[cleanup] Запущена фоновая очистка каждые {interval // 60} мин, "
+             f"папка: {BOT_TMP_DIR}, порог: {STALE_FILE_AGE_SEC // 60} мин")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            removed, freed_mb = cleanup_stale_tmp()
+            if removed > 0:
+                log.info(f"[cleanup] Очищено {removed} папок, освобождено {freed_mb:.1f} МБ")
+        except Exception as e:
+            log.error(f"[cleanup] Неожиданная ошибка: {e}")
+
+
 # ─── ЗАПУСК ────────────────────────────────────────────────────────────────────
 
 async def post_init(app):
@@ -800,6 +868,16 @@ async def post_init(app):
         BotCommand("cancel",   "Отменить ввод подписи"),
     ])
     log.info("Меню команд зарегистрировано.")
+
+    # Чистим мусор от предыдущего запуска сразу при старте
+    removed, freed_mb = cleanup_stale_tmp()
+    if removed > 0:
+        log.info(f"[startup cleanup] Удалено {removed} старых папок, освобождено {freed_mb:.1f} МБ")
+    else:
+        log.info(f"[startup cleanup] {BOT_TMP_DIR} чист")
+
+    # Запускаем фоновую очистку
+    asyncio.create_task(background_cleanup())
 
 
 def main():

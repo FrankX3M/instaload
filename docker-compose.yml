@@ -7,5 +7,13 @@ services:
       - ADMIN_ID=${ADMIN_ID:-}
       - IG_USERNAME=${IG_USERNAME:-}
       - IG_PASSWORD=${IG_PASSWORD:-}
+      # Папка для временных видео внутри контейнера
+      - BOT_TMP_DIR=/tmp/bot_dl
+      # Удалять файлы старше 30 минут (защита от крэшей)
+      - STALE_FILE_AGE_SEC=1800
+      # Фоновая очистка каждые 15 минут
+      - CLEANUP_INTERVAL_SEC=900
     volumes:
-      - /tmp/bot_videos:/tmp
+      # Монтируем только папку бота, а не весь /tmp
+      # Это изолирует временные видео и не засоряет системный /tmp хоста
+      - /tmp/bot_dl:/tmp/bot_dl
