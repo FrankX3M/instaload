@@ -16,10 +16,10 @@ log "🧹 Чистим перед сборкой..."
 docker system prune -f
 docker volume prune -f
 
-# Чистим недоотправленные видео бота (volume /tmp/bot_videos)
-if [ -d "/tmp/bot_videos" ]; then
-    BOT_SIZE=$(du -sh /tmp/bot_videos 2>/dev/null | awk '{print $1}')
-    rm -rf /tmp/bot_videos/*
+# Чистим недоотправленные видео бота (volume /tmp/bot_dl)
+if [ -d "/tmp/bot_dl" ]; then
+    BOT_SIZE=$(du -sh /tmp/bot_dl 2>/dev/null | awk '{print $1}')
+    rm -rf /tmp/bot_dl*
     ok "bot_videos очищен (было: $BOT_SIZE)"
 fi
 
