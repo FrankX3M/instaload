@@ -33,6 +33,7 @@ import tempfile
 import logging
 import time
 import asyncio
+import http.cookiejar
 import yt_dlp
 import instaloader
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
@@ -465,7 +466,12 @@ def download_media(url: str, tmp_dir: str, platform: str, yt_quality: str = DEFA
         ydl_opts["format"] = "best[ext=mp4]/best"
         # Cookies — самый надёжный способ авторизации в Instagram
         if IG_COOKIES and os.path.isfile(IG_COOKIES):
-            ydl_opts["cookiefile"] = IG_COOKIES
+            # yt-dlp перезаписывает cookiefile после скачивания (обновляет сессию).
+            # Оригинал примонтирован read-only, поэтому копируем в writable tmp_dir —
+            # иначе на выходе [Errno 30] Read-only file system и скачанный файл теряется.
+            cookie_copy = os.path.join(tmp_dir, "ig_cookies.txt")
+            shutil.copyfile(IG_COOKIES, cookie_copy)
+            ydl_opts["cookiefile"] = cookie_copy
             log.info(f"Instagram: используем cookies из {IG_COOKIES}")
         elif IG_USERNAME and IG_PASSWORD:
             # Устаревший способ — Instagram часто его блокирует
@@ -549,13 +555,21 @@ def download_instagram_photos(url: str, tmp_dir: str) -> list[str]:
             quiet=True,
         )
 
-        # Авторизация через cookies-файл если доступен
+        # Загружаем Netscape-cookies напрямую в requests-сессию instaloader.
+        # (load_session_from_file ждёт собственный формат сессии, а не cookies.txt.)
         if IG_COOKIES and os.path.isfile(IG_COOKIES):
             try:
-                L.load_session_from_file(IG_USERNAME or "user", IG_COOKIES)
-                log.info("instaloader: сессия загружена из cookies")
-            except Exception:
-                pass  # продолжаем без авторизации
+                cj = http.cookiejar.MozillaCookieJar(IG_COOKIES)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                L.context._session.cookies.update(cj)
+                who = L.test_login()
+                if who:
+                    L.context.username = who
+                    log.info(f"instaloader: авторизован через cookies как {who}")
+                else:
+                    log.warning("instaloader: cookies загружены, но сессия не активна (протухли?)")
+            except Exception as e:
+                log.warning(f"instaloader: не удалось загрузить cookies: {e}")
 
         # Авторизация через логин/пароль
         if not L.context.is_logged_in and IG_USERNAME and IG_PASSWORD:
