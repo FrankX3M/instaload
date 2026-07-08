@@ -649,7 +649,28 @@ async def send_media_files(message, files: list[str], caption: str | None):
                 )
         return True
 
-    # Несколько файлов — альбом (Telegram принимает до 10)
+    # Несколько видео (например, нарезанные части большого ролика) шлём ПО ОДНОМУ.
+    # python-telegram-bot читает файл целиком в память, а reply_media_group держит
+    # все файлы в RAM разом → на крупных видео это OOM и контейнер убивают (exit 137).
+    # Последовательная отправка держит в памяти максимум одну часть за раз.
+    all_videos = all(classify_file(p) == "video" for p in files)
+    if all_videos:
+        total = len(files)
+        for idx, path in enumerate(files):
+            with open(path, "rb") as f:
+                # Подпись — только на первую часть; номер части в остальных
+                if idx == 0:
+                    part_caption = caption or None
+                else:
+                    part_caption = f"Часть {idx + 1}/{total}"
+                await message.reply_video(
+                    video=f,
+                    caption=part_caption,
+                    supports_streaming=True,
+                )
+        return True
+
+    # Фото/смешанные — альбом (Telegram принимает до 10)
     chunks = [files[i:i + MAX_ALBUM_SIZE] for i in range(0, len(files), MAX_ALBUM_SIZE)]
     for chunk_idx, chunk in enumerate(chunks):
         media_group = []
