@@ -7,6 +7,8 @@ services:
       - ADMIN_ID=${ADMIN_ID:-}
       - IG_USERNAME=${IG_USERNAME:-}
       - IG_PASSWORD=${IG_PASSWORD:-}
+      # Путь к cookies ВНУТРИ контейнера (файл монтируется ниже через volumes)
+      - IG_COOKIES=/app/instagram_cookies.txt
       # Папка для временных видео внутри контейнера
       - BOT_TMP_DIR=/tmp/bot_dl
       # Удалять файлы старше 30 минут (защита от крэшей)
@@ -17,3 +19,7 @@ services:
       # Монтируем только папку бота, а не весь /tmp
       # Это изолирует временные видео и не засоряет системный /tmp хоста
       - /tmp/bot_dl:/tmp/bot_dl
+      # Cookies Instagram (только чтение). Файл instagram_cookies.txt должен лежать
+      # рядом с этим docker-compose.yml. ВАЖНО: создай файл ДО первого запуска,
+      # иначе Docker создаст на его месте пустую папку.
+      - ./instagram_cookies.txt:/app/instagram_cookies.txt:ro
