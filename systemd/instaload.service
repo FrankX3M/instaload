@@ -1,0 +1,57 @@
+[Unit]
+Description=instaload — Telegram bot (Instagram / TikTok / YouTube downloader)
+Documentation=https://github.com/FrankX3M/instaload
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=instaload
+Group=instaload
+WorkingDirectory=/opt/instaload/app
+EnvironmentFile=/etc/instaload/instaload.env
+Environment=HOME=/var/lib/instaload PYTHONUNBUFFERED=1
+ExecStart=/opt/instaload/venv/bin/python -m instaload
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+
+# ── Лимиты ресурсов (аналог mem_limit в compose, но убивает только бота) ──────
+MemoryMax=300M
+MemoryHigh=250M
+TasksMax=64
+CPUWeight=50
+Nice=5
+IOWeight=50
+
+# ── Изоляция (не хуже контейнера, если включить) ───────────────────────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Единственное место на запись: состояние, cookies, кэш, tmp, бинарник yt-dlp
+ReadWritePaths=/var/lib/instaload
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=instaload
+
+[Install]
+WantedBy=multi-user.target
