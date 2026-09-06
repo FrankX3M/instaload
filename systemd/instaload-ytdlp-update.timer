@@ -1,0 +1,14 @@
+[Unit]
+Description=instaload — ежедневное обновление yt-dlp
+
+[Timer]
+# Каждый день ~05:30 по времени сервера, с разбросом до часа, чтобы не долбить GitHub ровно в :30.
+OnCalendar=*-*-* 05:30:00
+RandomizedDelaySec=1h
+# Если сервер был выключен в это время — выполнить при следующей загрузке.
+Persistent=true
+# И через 10 минут после загрузки сервера.
+OnBootSec=10min
+
+[Install]
+WantedBy=timers.target

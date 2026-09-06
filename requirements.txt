@@ -1,3 +1,7 @@
-python-telegram-bot==20.7
-yt-dlp
-instaloader
+# Процесс бота: только Telegram-клиент. yt-dlp — отдельный бинарник (см. scripts/install.sh),
+# он НЕ импортируется в бот и обновляется независимо (scripts/update_ytdlp.sh).
+python-telegram-bot~=22.8
+
+# Fallback для фото/каруселей Instagram. Запускается из подпроцесса (instaload/ig_fetch.py),
+# в процессе бота не импортируется.
+instaloader~=4.15

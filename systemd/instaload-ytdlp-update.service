@@ -1,0 +1,26 @@
+[Unit]
+Description=instaload — обновление yt-dlp со smoke-тестом и откатом
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=instaload
+Group=instaload
+WorkingDirectory=/opt/instaload/app
+EnvironmentFile=/etc/instaload/instaload.env
+Environment=HOME=/var/lib/instaload
+ExecStart=/bin/bash /opt/instaload/app/scripts/update_ytdlp.sh
+TimeoutStartSec=15min
+
+MemoryMax=300M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/instaload
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=instaload-update

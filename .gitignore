@@ -25,3 +25,9 @@ Thumbs.db
 
 # Logs
 *.log
+# instaload runtime
+*.bak
+state.json
+cookies/
+instaload.env
+.pytest_cache/
