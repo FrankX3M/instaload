@@ -17,7 +17,6 @@ import contextlib
 import html
 import logging
 import os
-import re
 import secrets
 import shutil
 import tempfile
@@ -26,8 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import (
-    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
-    InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, Message, Update,
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
+    LinkPreviewOptions, Message, Update,
 )
 from telegram.constants import ChatType, ParseMode
 from telegram.error import TelegramError
@@ -36,50 +35,18 @@ from telegram.ext import (
     ContextTypes, Defaults, MessageHandler, filters,
 )
 
-from . import config, media
+from . import config, media, sender
+from .links import LABELS, build_caption, clean_url, extract_urls, source_line  # noqa: F401
 from .cookies import CookieError, CookieStore, looks_like_header_string, summarize, write_back_shared
 from .state import State
 
 log = logging.getLogger("instaload.bot")
-
-# ─── Паттерны ссылок ──────────────────────────────────────────────────────────
-
-INSTAGRAM_PATTERN = re.compile(
-    r"https?://(?:www\.)?instagram\.com/(?:[A-Za-z0-9_.]+/)?(?:reels?|p|tv)/[A-Za-z0-9_-]+/?(?:\?[^\s]*)?"
-)
-TIKTOK_PATTERN = re.compile(
-    r"https?://(?:www\.|m\.)?(?:tiktok\.com/@[\w.]+/(?:video|photo)/\d+|(?:vm|vt)\.tiktok\.com/[A-Za-z0-9]+|"
-    r"tiktok\.com/t/[A-Za-z0-9]+)/?(?:\?[^\s]*)?"
-)
-YOUTUBE_PATTERN = re.compile(
-    r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?(?:[^&\s]+&)*v=|shorts/|embed/|live/)|youtu\.be/)"
-    r"[A-Za-z0-9_-]+(?:[&?][^\s]*)?"
-)
-
-PLATFORMS = (
-    ("instagram", INSTAGRAM_PATTERN, "Instagram"),
-    ("tiktok", TIKTOK_PATTERN, "TikTok"),
-    ("youtube", YOUTUBE_PATTERN, "YouTube"),
-)
-LABELS = {p: label for p, _, label in PLATFORMS}
 
 DEFAULT_HINTS = {
     "instagram": "Пост приватный, удалён или Instagram ограничил запросы с сервера.",
     "tiktok": "TikTok мог заблокировать запрос, попробуй позже.",
     "youtube": "Видео могло быть удалено, приватным или недоступным с IP сервера.",
 }
-
-PHOTO_MAX_MB = 10   # лимит Telegram на sendPhoto; больше — отправляем документом
-
-
-def extract_urls(text: str) -> list[tuple[str, str]]:
-    """[(platform, url), ...] в порядке появления в тексте."""
-    found: list[tuple[int, str, str]] = []
-    for platform, pattern, _ in PLATFORMS:
-        for m in pattern.finditer(text):
-            found.append((m.start(), platform, m.group(0)))
-    found.sort()
-    return [(p, u) for _, p, u in found]
 
 
 # ─── Задача очереди ───────────────────────────────────────────────────────────
@@ -94,7 +61,8 @@ class Job:
     chat_id: int
     user_id: int | None        # None для постов канала
     quality: str
-    caption: str | None
+    caption: str | None        # готовая HTML-подпись (текст админа + ссылка на источник)
+    source: str | None         # строка «🔗 Источник» для частей/альбомов
     link_only: bool
     created_at: float = field(default_factory=time.time)
 
@@ -565,7 +533,9 @@ class InstaloadBot:
 
         job = Job(
             id=secrets.token_hex(3), url=url, platform=platform, message=message, status=status,
-            chat_id=message.chat_id, user_id=uid, quality=quality, caption=self.state.caption,
+            chat_id=message.chat_id, user_id=uid, quality=quality,
+            caption=build_caption(url, platform, self.state.caption, with_source=config.SOURCE_LINK),
+            source=source_line(clean_url(url, platform), platform) if config.SOURCE_LINK else None,
             link_only=link_only,
         )
         self.pending[uid] = self.pending.get(uid, 0) + 1
@@ -656,7 +626,7 @@ class InstaloadBot:
                 hint = error or DEFAULT_HINTS[job.platform]
                 if job.platform == "instagram" and owner != "user":
                     hint += f"\n💡 Добавь свои cookies Instagram — напиши {self.private_link()} команду /cookies"
-                await self._edit(job.status, f"❌ Не удалось скачать {label}.\n{hint}\n🔗 {job.url}")
+                await self._edit(job.status, f"❌ Не удалось скачать {label}.\n{hint}\n🔗 {clean_url(job.url, job.platform)}")
                 self.state.bump("failed")
                 return
 
@@ -672,7 +642,7 @@ class InstaloadBot:
                 if still:
                     tip = "\n💡 Попробуй /quality ниже." if job.platform == "youtube" else ""
                     await self._edit(job.status, f"⚠️ Не удалось уложить файл в 50 МБ "
-                                     f"({', '.join(f'{media.size_mb(f):.0f} МБ' for f in still)}).{tip}\n🔗 {job.url}")
+                                     f"({', '.join(f'{media.size_mb(f):.0f} МБ' for f in still)}).{tip}\n🔗 {clean_url(job.url, job.platform)}")
                     self.state.bump("failed")
                     return
 
@@ -681,11 +651,11 @@ class InstaloadBot:
             await self._edit(job.status, f"📤 Отправляю видео по частям ({n})…" if is_parts
                              else f"📤 Отправляю альбом ({n} файлов)…" if n > 1 else "📤 Отправляю…")
 
-            await self.send_files(job.message, files, job.caption, parts=is_parts)
+            await sender.send_files(job.message, files, job.caption, job.source, parts=is_parts)
 
             with contextlib.suppress(TelegramError):
                 await job.status.delete()
-            if job.link_only and job.message.reply_to_message is None:
+            if config.DELETE_ORIGINAL and job.link_only and job.message.reply_to_message is None:
                 with contextlib.suppress(TelegramError):
                     await job.message.delete()
             self.state.bump("done")
@@ -693,52 +663,14 @@ class InstaloadBot:
 
         except TelegramError as e:
             log.error("%s ошибка Telegram: %s", job.tag, e)
-            await self._edit(job.status, f"❌ Ошибка при отправке: {e}\n🔗 {job.url}")
+            await self._edit(job.status, f"❌ Ошибка при отправке: {e}\n🔗 {clean_url(job.url, job.platform)}")
             self.state.bump("failed")
         except Exception as e:  # noqa: BLE001
             log.exception("%s ошибка", job.tag)
-            await self._edit(job.status, f"❌ Внутренняя ошибка: {type(e).__name__}\n🔗 {job.url}")
+            await self._edit(job.status, f"❌ Внутренняя ошибка: {type(e).__name__}\n🔗 {clean_url(job.url, job.platform)}")
             self.state.bump("failed")
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    # ── отправка (потоковая) ────────────────────────────────────────────────
-
-    @staticmethod
-    def _stream(fh, path: Path) -> InputFile:
-        # read_file_handle=False — PTB ≥ 21.5 отдаёт дескриптор httpx, файл не читается в память
-        return InputFile(fh, filename=path.name, read_file_handle=False)
-
-    async def send_files(self, message: Message, files: list[Path], caption: str | None, parts: bool) -> None:
-        if len(files) == 1 or (parts and len(files) > 1):
-            total = len(files)
-            for idx, path in enumerate(files):
-                part_caption = caption if idx == 0 else (f"Часть {idx + 1}/{total}" if parts else None)
-                with open(path, "rb") as fh:
-                    kind = media.classify_file(path)
-                    if kind == "video":
-                        await message.reply_video(video=self._stream(fh, path), caption=part_caption,
-                                                  supports_streaming=True)
-                    elif kind == "photo" and media.size_mb(path) <= PHOTO_MAX_MB:
-                        await message.reply_photo(photo=self._stream(fh, path), caption=part_caption)
-                    else:
-                        await message.reply_document(document=self._stream(fh, path), caption=part_caption)
-            return
-
-        # альбом: до 10 элементов в группе, подпись только на первом
-        for start in range(0, len(files), config.MAX_ALBUM_SIZE):
-            chunk = files[start:start + config.MAX_ALBUM_SIZE]
-            with contextlib.ExitStack() as stack:
-                group = []
-                for idx, path in enumerate(chunk):
-                    fh = stack.enter_context(open(path, "rb"))
-                    item_caption = caption if (start == 0 and idx == 0) else None
-                    if media.classify_file(path) == "video":
-                        group.append(InputMediaVideo(media=self._stream(fh, path), caption=item_caption,
-                                                     supports_streaming=True))
-                    else:
-                        group.append(InputMediaPhoto(media=self._stream(fh, path), caption=item_caption))
-                await message.reply_media_group(media=group)
 
     # ── фоновая очистка ─────────────────────────────────────────────────────
 

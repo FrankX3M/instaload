@@ -118,6 +118,14 @@ DEFAULT_YT_QUALITY = _env("DEFAULT_YT_QUALITY", "720")
 if DEFAULT_YT_QUALITY not in YT_QUALITIES:
     DEFAULT_YT_QUALITY = "720"
 
+# ─── Ссылка на первоисточник ──────────────────────────────────────────────────
+
+# Добавлять под медиа ссылку на оригинал (Instagram/TikTok/YouTube).
+SOURCE_LINK = _env_bool("SOURCE_LINK", True)
+# Удалять исходное сообщение, если в нём была только ссылка. Раз ссылка теперь
+# сохраняется в подписи, это безопасно; выключите, если хотите оставлять оригинал.
+DELETE_ORIGINAL = _env_bool("DELETE_ORIGINAL", True)
+
 # ─── Прочее ───────────────────────────────────────────────────────────────────
 
 EASTER_EGG = _env_bool("EASTER_EGG", True)   # «да» → «пизда», как в оригинале

@@ -78,6 +78,8 @@ INSTALOAD_DATA_DIR=/tmp/il /opt/instaload/venv/bin/python -m instaload
 | `MAX_DOWNLOAD_MB` | 400 | `--max-filesize` yt-dlp, защита диска |
 | `YT_MERGE` | 1 | `bestvideo+bestaudio` (настоящие 480/720). `0` — только прогрессивные форматы |
 | `IG_COOKIES_SHARED` | — | общий файл cookies Instagram для тех, у кого нет своих (и для постов каналов). Необязательно |
+| `SOURCE_LINK` | 1 | под каждым медиа — «🔗 Источник» со ссылкой на оригинал (очищена от `igsh`, `utm_*`, `si`). Ссылка остаётся, даже когда исходное сообщение удалено |
+| `DELETE_ORIGINAL` | 1 | удалять сообщение, в котором была только ссылка. `0` — оставлять |
 | `YT_COOKIES` | — | cookies YouTube против «Sign in to confirm you're not a bot» |
 | `YTDLP_CHANNEL` | stable | канал обновления: `stable` / `nightly` / `master` |
 | `SMOKE_URLS` | одно видео YouTube | ссылки для smoke-теста после обновления yt-dlp |
@@ -142,7 +144,9 @@ Telegram ──long polling──► PTB Application (один процесс, ~
 
 Файлы:
 
-- `instaload/bot.py` — хэндлеры, очередь, воркер, отправка;
+- `instaload/bot.py` — хэндлеры, очередь, воркер;
+- `instaload/links.py` — поиск и очистка ссылок, подпись со ссылкой на первоисточник;
+- `instaload/sender.py` — потоковая отправка видео/фото/альбомов;
 - `instaload/media.py` — подпроцессы: yt-dlp, ffmpeg, helper; объяснение ошибок;
 - `instaload/ig_fetch.py` — helper на instaloader (запускается как отдельный процесс);
 - `instaload/cookies.py` — парсинг (Netscape / JSON / строка), фильтрация, per-user хранилище;

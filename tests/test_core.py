@@ -12,8 +12,8 @@ import pytest
 os.environ.setdefault("BOT_TOKEN", "test")
 os.environ.setdefault("INSTALOAD_DATA_DIR", "/tmp/instaload-test")
 
-from instaload import config, cookies, media  # noqa: E402
-from instaload.bot import extract_urls  # noqa: E402
+from instaload import config, cookies, links, media  # noqa: E402
+from instaload.links import build_caption, clean_url, extract_urls  # noqa: E402
 from instaload.state import State  # noqa: E402
 
 NETSCAPE = """# Netscape HTTP Cookie File
@@ -145,3 +145,31 @@ def test_explain_ytdlp_error():
     assert "cookies" in media.explain_ytdlp_error("ERROR: [Instagram] X: login required").lower()
     assert "приватное" in media.explain_ytdlp_error("ERROR: Private video").lower()
     assert media.explain_ytdlp_error("something odd") == ""
+
+
+def test_extract_urls_deduplicates():
+    t = "https://youtu.be/jNQXAC9IVRw https://youtu.be/jNQXAC9IVRw"
+    assert len(extract_urls(t)) == 1
+
+
+def test_clean_url_strips_tracking():
+    assert clean_url("https://www.instagram.com/reel/Cabc_12/?igsh=abc&utm_source=x", "instagram") \
+        == "https://www.instagram.com/reel/Cabc_12/"
+    assert clean_url("https://www.youtube.com/watch?v=jNQXAC9IVRw&si=zzz&t=10", "youtube") \
+        == "https://www.youtube.com/watch?v=jNQXAC9IVRw&t=10"
+    assert clean_url("https://youtu.be/jNQXAC9IVRw?si=zzz", "youtube") == "https://youtu.be/jNQXAC9IVRw"
+    assert clean_url("https://vm.tiktok.com/ZMabc/?_r=1", "tiktok") == "https://vm.tiktok.com/ZMabc/"
+
+
+def test_caption_always_contains_source():
+    url = "https://www.instagram.com/reel/Cabc_12/?igsh=1"
+    only = build_caption(url, "instagram")
+    assert 'href="https://www.instagram.com/reel/Cabc_12/"' in only and "igsh" not in only
+    with_text = build_caption(url, "instagram", "<b>hi</b> & co")
+    assert with_text.startswith("&lt;b&gt;hi&lt;/b&gt; &amp; co") and with_text.endswith("</a>")
+    # длинный текст обрезается, ссылка остаётся целой
+    long = build_caption(url, "instagram", "x" * 5000)
+    assert len(long) <= links.CAPTION_LIMIT and "Cabc_12" in long and long.endswith("</a>")
+    # источник выключен
+    assert build_caption(url, "instagram", with_source=False) is None
+    assert build_caption(url, "instagram", "text", with_source=False) == "text"
