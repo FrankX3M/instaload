@@ -205,12 +205,15 @@ class DownloadResult:
         return bool(self.files)
 
 
+YT_AUTH_HINT = ("YouTube требует подтверждения входа (блокировка IP сервера "
+                "или видео с возрастным ограничением).")
+
 _YTDLP_HINTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"login required|requested content is not available|rate-limit reached|"
                 r"empty media response|checkpoint_required|Please wait a few minutes", re.I),
      "Instagram требует авторизацию или ограничил запросы. Добавь свои cookies: /cookies"),
     (re.compile(r"Sign in to confirm|not a bot|cookies.*youtube", re.I),
-     "YouTube требует подтверждения (блокировка IP сервера). Админ может добавить cookies YouTube."),
+     YT_AUTH_HINT),
     (re.compile(r"Private video|This video is private|is private", re.I), "Видео приватное."),
     (re.compile(r"Video unavailable|has been removed|does not exist|404", re.I),
      "Видео недоступно или удалено."),

@@ -1,16 +1,19 @@
 """
-Хранилище cookies Instagram — отдельно для каждого пользователя Telegram.
+Хранилище cookies (Instagram и YouTube) — отдельно для каждого пользователя Telegram.
 
 Принципы:
-  • файл cookies пользователя лежит в DATA_DIR/cookies/<user_id>.txt с правами 0600;
+  • файл cookies пользователя лежит в DATA_DIR/cookies/<user_id>.txt (Instagram) и
+    DATA_DIR/cookies/youtube/<user_id>.txt (YouTube) с правами 0600;
   • используется ТОЛЬКО для ссылок, которые прислал этот же пользователь (по from_user.id);
-  • перед сохранением из файла выкидывается всё, кроме cookies домена instagram.com —
+  • перед сохранением из файла выкидывается всё, кроме cookies нужной площадки
+    (instagram.com; youtube.com + google.com — там живёт авторизация YouTube) —
     боту не нужны cookies других сайтов, и хранить их незачем;
+  • платформа определяется по содержимому файла автоматически;
   • бот принимает три формата: Netscape cookies.txt (расширения «Get cookies.txt LOCALLY»,
     yt-dlp), JSON-экспорт (Cookie-Editor / EditThisCookie) и строку заголовка
     «sessionid=…; csrftoken=…; ds_user_id=…»;
   • после каждой загрузки обновлённые yt-dlp cookies записываются обратно —
-    Instagram ротирует csrftoken/sessionid, так сессия живёт дольше.
+    Instagram/YouTube ротируют токены, так сессия живёт дольше.
 """
 
 from __future__ import annotations
@@ -32,7 +35,48 @@ REQUIRED_COOKIE = "sessionid"
 USEFUL_COOKIES = ("sessionid", "csrftoken", "ds_user_id", "mid", "ig_did", "rur", "datr")
 NETSCAPE_HEADER = "# Netscape HTTP Cookie File\n# Сохранено ботом instaload. Только cookies instagram.com.\n"
 
+
+@dataclass(frozen=True)
+class PlatformSpec:
+    key: str
+    label: str
+    site: str                         # для сообщений об ошибках
+    domains: tuple[str, ...]          # какие домены оставляем
+    default_domain: str               # домен для JSON/строки без домена
+    required_any: tuple[str, ...]     # нужна хотя бы одна непустая из этих cookies
+    useful: tuple[str, ...]
+    no_auth_error: str
+    header: str
+    dedup_by_name: bool               # Instagram: одно имя — одна cookie; YouTube: SID есть и на youtube.com, и на google.com
+
+    def matches(self, domain: str) -> bool:
+        d = domain.lower().lstrip(".")
+        return any(d == x or d.endswith("." + x) for x in self.domains)
+
+
+PLATFORMS: dict[str, PlatformSpec] = {
+    "instagram": PlatformSpec(
+        key="instagram", label="Instagram", site="instagram.com",
+        domains=(IG_DOMAIN_SUFFIX,), default_domain=".instagram.com",
+        required_any=(REQUIRED_COOKIE,), useful=USEFUL_COOKIES,
+        no_auth_error="нет cookie «sessionid» — вы не залогинены в Instagram в этом браузере?",
+        header=NETSCAPE_HEADER, dedup_by_name=True,
+    ),
+    "youtube": PlatformSpec(
+        key="youtube", label="YouTube", site="youtube.com",
+        domains=("youtube.com", "google.com"), default_domain=".youtube.com",
+        required_any=("SID", "__Secure-1PSID", "__Secure-3PSID", "SAPISID", "LOGIN_INFO"),
+        useful=("SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID",
+                "LOGIN_INFO", "VISITOR_INFO1_LIVE", "PREF"),
+        no_auth_error="нет cookies входа в аккаунт Google/YouTube (SID, __Secure-3PSID, LOGIN_INFO) — "
+                      "вы не залогинены в этом браузере?",
+        header="# Netscape HTTP Cookie File\n# Сохранено ботом instaload. Только cookies youtube.com / google.com.\n",
+        dedup_by_name=False,
+    ),
+}
+
 _HEADER_STRING_RE = re.compile(r"(?:^|;\s*)sessionid=([^;\s]+)")
+_YT_HEADER_STRING_RE = re.compile(r"(?:^|;\s*)(?:SID|__Secure-[13]PSID|LOGIN_INFO)=([^;\s]+)")
 
 
 class CookieError(ValueError):
@@ -84,8 +128,7 @@ class CookieMeta:
 # ─── Парсинг ──────────────────────────────────────────────────────────────────
 
 def _is_ig(domain: str) -> bool:
-    d = domain.lower().lstrip(".")
-    return d == IG_DOMAIN_SUFFIX or d.endswith("." + IG_DOMAIN_SUFFIX)
+    return PLATFORMS["instagram"].matches(domain)
 
 
 def _parse_netscape(text: str) -> list[Cookie]:
@@ -123,7 +166,7 @@ def _parse_netscape(text: str) -> list[Cookie]:
     return out
 
 
-def _parse_json(text: str) -> list[Cookie]:
+def _parse_json(text: str, default_domain: str = ".instagram.com") -> list[Cookie]:
     data = json.loads(text)
     if isinstance(data, dict):
         data = data.get("cookies") or data.get("Cookies") or []
@@ -133,7 +176,7 @@ def _parse_json(text: str) -> list[Cookie]:
     for item in data:
         if not isinstance(item, dict) or "name" not in item or "value" not in item:
             continue
-        domain = str(item.get("domain") or ".instagram.com")
+        domain = str(item.get("domain") or default_domain)
         exp_raw = item.get("expirationDate", item.get("expires", item.get("expiry", 0))) or 0
         try:
             exp = int(float(exp_raw))
@@ -151,8 +194,8 @@ def _parse_json(text: str) -> list[Cookie]:
     return out
 
 
-def _parse_header_string(text: str) -> list[Cookie]:
-    """«sessionid=…; csrftoken=…» → cookies с доменом .instagram.com."""
+def _parse_header_string(text: str, domain: str = ".instagram.com") -> list[Cookie]:
+    """«sessionid=…; csrftoken=…» → cookies с доменом площадки (по умолчанию .instagram.com)."""
     exp = int(time.time()) + 365 * 24 * 3600
     out: list[Cookie] = []
     for chunk in re.split(r";\s*|\n", text.strip()):
@@ -163,68 +206,107 @@ def _parse_header_string(text: str) -> list[Cookie]:
         value = value.strip().strip('"')
         if not name or not value:
             continue
-        out.append(Cookie(".instagram.com", True, "/", True, exp, name, value))
+        out.append(Cookie(domain, True, "/", True, exp, name, value))
     return out
 
 
+def header_string_platform(text: str) -> str | None:
+    """Какой площадке принадлежит строка «name=value; name=value» (None — не похоже на cookies)."""
+    if "\t" in text:
+        return None
+    if _HEADER_STRING_RE.search(text):
+        return "instagram"
+    if _YT_HEADER_STRING_RE.search(text):
+        return "youtube"
+    return None
+
+
 def looks_like_header_string(text: str) -> bool:
-    return bool(_HEADER_STRING_RE.search(text)) and "\t" not in text
+    return header_string_platform(text) is not None
 
 
-def parse_cookies(raw: bytes | str) -> list[Cookie]:
-    """
-    Определяет формат, парсит, оставляет только cookies instagram.com.
-    Бросает CookieError, если результат непригоден (нет sessionid).
-    """
+def _decode(raw: bytes | str) -> str:
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-    text = text.lstrip("\ufeff")
-    stripped = text.strip()
-    if not stripped:
-        raise CookieError("пустой файл")
+    return text.lstrip("\ufeff")
 
-    cookies: list[Cookie]
+
+def _parse_any(text: str, platform: str) -> list[Cookie]:
+    """Определяет формат и парсит без фильтрации по домену."""
+    spec = PLATFORMS[platform]
+    stripped = text.strip()
     if stripped[0] in "[{":
         try:
-            cookies = _parse_json(stripped)
+            return _parse_json(stripped, spec.default_domain)
         except json.JSONDecodeError as e:
             raise CookieError(f"битый JSON: {e}") from e
-    elif "\t" in stripped or stripped.startswith("#"):
-        cookies = _parse_netscape(text)
-    elif looks_like_header_string(stripped):
-        cookies = _parse_header_string(stripped)
-    else:
-        cookies = _parse_netscape(text)
-
-    ig = [c for c in cookies if _is_ig(c.domain)]
-    if not ig:
-        raise CookieError("в файле нет cookies для instagram.com")
-
-    # дедупликация по имени: оставляем последнюю (обычно самая свежая)
-    by_name: dict[str, Cookie] = {}
-    for c in ig:
-        by_name[c.name] = c
-    ig = list(by_name.values())
-
-    if not any(c.name == REQUIRED_COOKIE and c.value for c in ig):
-        raise CookieError("нет cookie «sessionid» — вы не залогинены в Instagram в этом браузере?")
-
-    return ig
+    if "\t" in stripped or stripped.startswith("#"):
+        return _parse_netscape(text)
+    hp = header_string_platform(stripped)
+    if hp:
+        return _parse_header_string(stripped, PLATFORMS[hp].default_domain)
+    return _parse_netscape(text)
 
 
-def to_netscape_text(cookies: list[Cookie]) -> str:
-    return NETSCAPE_HEADER + "\n".join(c.to_netscape() for c in cookies) + "\n"
+def detect_platforms(raw: bytes | str) -> list[str]:
+    """Для каких площадок в файле/строке есть cookies. Пустой список — это не cookies."""
+    text = _decode(raw)
+    if not text.strip():
+        return []
+    try:
+        cookies = _parse_any(text, "instagram")
+    except CookieError:
+        return []
+    # сначала площадки, для которых есть cookies входа в аккаунт; если таких нет — любые с совпавшим
+    # доменом, чтобы пользователь увидел конкретную причину отказа (а не «это не cookies»).
+    # Так в экспорте Instagram со случайной cookie google.com не появится лишнее «YouTube».
+    valid = [k for k, spec in PLATFORMS.items()
+             if any(spec.matches(c.domain) and c.name in spec.required_any and c.value for c in cookies)]
+    if valid:
+        return valid
+    return [k for k, spec in PLATFORMS.items() if any(spec.matches(c.domain) for c in cookies)]
 
 
-def summarize(cookies: list[Cookie]) -> str:
+def parse_cookies(raw: bytes | str, platform: str = "instagram") -> list[Cookie]:
+    """
+    Определяет формат, парсит, оставляет только cookies нужной площадки.
+    Бросает CookieError, если результат непригоден (нет cookies входа в аккаунт).
+    """
+    spec = PLATFORMS[platform]
+    text = _decode(raw)
+    if not text.strip():
+        raise CookieError("пустой файл")
+
+    kept = [c for c in _parse_any(text, platform) if spec.matches(c.domain)]
+    if not kept:
+        raise CookieError(f"в файле нет cookies для {spec.site}")
+
+    # дедупликация: оставляем последнюю (обычно самая свежая)
+    by_key: dict[tuple, Cookie] = {}
+    for c in kept:
+        by_key[(c.name,) if spec.dedup_by_name else (c.domain.lstrip("."), c.path, c.name)] = c
+    kept = list(by_key.values())
+
+    if not any(c.name in spec.required_any and c.value for c in kept):
+        raise CookieError(spec.no_auth_error)
+
+    return kept
+
+
+def to_netscape_text(cookies: list[Cookie], platform: str = "instagram") -> str:
+    return PLATFORMS[platform].header + "\n".join(c.to_netscape() for c in cookies) + "\n"
+
+
+def summarize(cookies: list[Cookie], platform: str = "instagram") -> str:
     names = {c.name for c in cookies}
-    present = [n for n in USEFUL_COOKIES if n in names]
+    present = [n for n in PLATFORMS[platform].useful if n in names]
     return f"{len(cookies)} cookies, из ключевых: {', '.join(present) or '—'}"
 
 
 # ─── Хранилище ────────────────────────────────────────────────────────────────
 
 class CookieStore:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, platform: str = "instagram"):
+        self.platform = platform
         self.dir = directory
         self.dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -261,8 +343,8 @@ class CookieStore:
 
     def save(self, user_id: int, raw: bytes | str) -> tuple[list[Cookie], CookieMeta]:
         """Парсит, фильтрует и сохраняет cookies пользователя. Бросает CookieError."""
-        cookies = parse_cookies(raw)
-        atomic_write_text(self._path(user_id), to_netscape_text(cookies), mode=0o600)
+        cookies = parse_cookies(raw, self.platform)
+        atomic_write_text(self._path(user_id), to_netscape_text(cookies, self.platform), mode=0o600)
         meta = self.meta(user_id)
         now = time.time()
         meta.added_at = meta.added_at or now
@@ -271,7 +353,7 @@ class CookieStore:
         meta.username = None      # аккаунт мог измениться — перепроверим
         meta.checked = False
         self.save_meta(user_id, meta)
-        log.info("cookies сохранены для user=%s (%s)", user_id, summarize(cookies))
+        log.info("cookies %s сохранены для user=%s (%s)", self.platform, user_id, summarize(cookies, self.platform))
         return cookies, meta
 
     def delete(self, user_id: int) -> bool:
@@ -300,8 +382,8 @@ class CookieStore:
             new_raw = updated_file.read_bytes()
             if new_raw == target.read_bytes():
                 return False
-            cookies = parse_cookies(new_raw)
-            atomic_write_text(target, to_netscape_text(cookies), mode=0o600)
+            cookies = parse_cookies(new_raw, self.platform)
+            atomic_write_text(target, to_netscape_text(cookies, self.platform), mode=0o600)
             meta = self.meta(user_id)
             meta.updated_at = time.time()
             meta.count = len(cookies)
@@ -315,7 +397,15 @@ class CookieStore:
         return False
 
 
-def write_back_shared(shared_path: str, updated_file: Path) -> bool:
+def save_shared(path: Path, raw: bytes | str, platform: str) -> list[Cookie]:
+    """Сохраняет общий файл cookies площадки (для всех пользователей без своих). Бросает CookieError."""
+    cookies = parse_cookies(raw, platform)
+    atomic_write_text(path, to_netscape_text(cookies, platform), mode=0o600)
+    log.info("общие cookies %s сохранены (%s)", platform, summarize(cookies, platform))
+    return cookies
+
+
+def write_back_shared(shared_path: str, updated_file: Path, platform: str = "instagram") -> bool:
     """То же для общего файла админа, если он задан и доступен на запись."""
     if not shared_path or not updated_file.is_file():
         return False
@@ -326,9 +416,9 @@ def write_back_shared(shared_path: str, updated_file: Path) -> bool:
         new_raw = updated_file.read_bytes()
         if new_raw == target.read_bytes():
             return False
-        cookies = parse_cookies(new_raw)
-        atomic_write_text(target, to_netscape_text(cookies), mode=0o600)
+        cookies = parse_cookies(new_raw, platform)
+        atomic_write_text(target, to_netscape_text(cookies, platform), mode=0o600)
         return True
     except (CookieError, OSError) as e:
-        log.warning("общие cookies: не обновлены (%s)", e)
+        log.warning("общие cookies %s: не обновлены (%s)", platform, e)
         return False

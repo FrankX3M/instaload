@@ -56,6 +56,8 @@ ADMIN_ID: int | None = int(_admin_raw) if _admin_raw.isdigit() else None
 DATA_DIR = Path(_env("INSTALOAD_DATA_DIR", "/var/lib/instaload"))
 TMP_DIR = Path(_env("INSTALOAD_TMP_DIR", str(DATA_DIR / "tmp")))
 COOKIES_DIR = DATA_DIR / "cookies"
+YT_COOKIES_DIR = COOKIES_DIR / "youtube"                     # cookies YouTube по пользователям
+YT_COOKIES_SHARED_FILE = DATA_DIR / "youtube_shared.txt"      # общие cookies YouTube, загруженные админом через бота
 STATE_FILE = DATA_DIR / "state.json"
 YTDLP_CACHE_DIR = DATA_DIR / "cache"
 
@@ -77,7 +79,9 @@ HELPER_PYTHON = _env("HELPER_PYTHON") or sys.executable
 # По умолчанию выключено: у каждого пользователя — свои cookies (см. docs/COOKIES.md).
 IG_COOKIES_SHARED = _env("IG_COOKIES_SHARED")
 
-# Необязательный файл cookies YouTube (помогает против «Sign in to confirm you're not a bot»).
+# Необязательный файл cookies YouTube (помогает против «Sign in to confirm you're not a bot»),
+# который админ кладёт на сервер руками. Порядок: свои cookies пользователя (/cookies_youtube) →
+# общий файл, загруженный админом через бота (/cookies_youtube_shared) → этот файл → без cookies.
 YT_COOKIES = _env("YT_COOKIES")
 
 # Максимальный размер файла cookies, который бот примет от пользователя.
@@ -137,7 +141,7 @@ PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 def ensure_dirs() -> None:
     """Создаёт рабочие каталоги с безопасными правами (только владелец)."""
-    for d in (DATA_DIR, TMP_DIR, COOKIES_DIR, YTDLP_CACHE_DIR):
+    for d in (DATA_DIR, TMP_DIR, COOKIES_DIR, YT_COOKIES_DIR, YTDLP_CACHE_DIR):
         d.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(d, 0o700)

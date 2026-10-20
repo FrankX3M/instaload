@@ -37,7 +37,10 @@ from telegram.ext import (
 
 from . import config, media, sender
 from .links import LABELS, build_caption, clean_url, extract_urls, source_line  # noqa: F401
-from .cookies import CookieError, CookieStore, looks_like_header_string, summarize, write_back_shared
+from .cookies import (
+    PLATFORMS as COOKIE_PLATFORMS, CookieError, CookieStore, detect_platforms, header_string_platform,
+    save_shared, summarize, write_back_shared,
+)
 from .state import State
 
 log = logging.getLogger("instaload.bot")
@@ -77,7 +80,10 @@ class InstaloadBot:
     def __init__(self) -> None:
         config.ensure_dirs()
         self.state = State(config.STATE_FILE)
-        self.cookies = CookieStore(config.COOKIES_DIR)
+        self.cookies = CookieStore(config.COOKIES_DIR)                              # Instagram
+        self.yt_cookies = CookieStore(config.YT_COOKIES_DIR, platform="youtube")    # YouTube
+        self.stores = {"instagram": self.cookies, "youtube": self.yt_cookies}
+        self.waiting_shared_yt: set[int] = set()     # админы, чьи следующие cookies YouTube — общие
         self.queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=config.QUEUE_MAX)
         self.pending: dict[int | None, int] = {}     # задач в очереди по пользователям
         self.active: dict[str, Job] = {}             # выполняемые задачи
@@ -112,6 +118,10 @@ class InstaloadBot:
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         app.add_handler(CommandHandler("cookies", self.cmd_cookies))
         app.add_handler(CommandHandler("cookies_delete", self.cmd_cookies_delete))
+        app.add_handler(CommandHandler("cookies_youtube", self.cmd_cookies_youtube))
+        app.add_handler(CommandHandler("cookies_youtube_delete", self.cmd_cookies_youtube_delete))
+        app.add_handler(CommandHandler("cookies_youtube_shared", self.cmd_cookies_youtube_shared))
+        app.add_handler(CommandHandler("cookies_youtube_shared_delete", self.cmd_cookies_youtube_shared_delete))
         app.add_handler(CommandHandler("stats", self.cmd_stats))
         app.add_handler(CommandHandler("update", self.cmd_update))
         app.add_handler(CallbackQueryHandler(self.on_callback))
@@ -126,6 +136,8 @@ class InstaloadBot:
             BotCommand("start", "О боте и список команд"),
             BotCommand("cookies", "Мои cookies Instagram: статус и как добавить"),
             BotCommand("cookies_delete", "Удалить мои cookies Instagram"),
+            BotCommand("cookies_youtube", "Мои cookies YouTube: статус и как добавить"),
+            BotCommand("cookies_youtube_delete", "Удалить мои cookies YouTube"),
             BotCommand("quality", "Качество YouTube: 360 / 480 / 720p"),
             BotCommand("caption", "Подпись под медиа (админ)"),
             BotCommand("cancel", "Отменить ввод подписи"),
@@ -171,9 +183,11 @@ class InstaloadBot:
             return
         uid = message.from_user.id if message.from_user else None
         has_cookies = self.cookies.has(uid)
+        has_yt_cookies = self.yt_cookies.has(uid)
         admin_section = (
             "\n\n🔑 <b>Администратор:</b>\n"
             "/caption — подпись под медиа\n"
+            "/cookies_youtube_shared — общие cookies YouTube для всех\n"
             "/stats — очередь, память, диск, версия yt-dlp\n"
             "/update — обновить yt-dlp сейчас"
             if self.is_admin(uid) else ""
@@ -183,15 +197,22 @@ class InstaloadBot:
             if has_cookies else
             "🍪 Cookies Instagram: <b>нет</b>. Без них Instagram часто не отдаёт посты — /cookies"
         )
+        yt_cookies_line = (
+            "🍪 Cookies YouTube: <b>добавлены</b> — /cookies_youtube"
+            if has_yt_cookies else
+            "🍪 Cookies YouTube: <b>нет</b>. Нужны, если YouTube просит подтвердить, что ты не бот — /cookies_youtube"
+        )
         await message.reply_text(
             "👋 <b>Пришли ссылку — получишь медиа прямо в чат.</b>\n\n"
             "📱 <b>Платформы:</b>\n"
             "• Instagram — Reels, посты, фото и карусели\n"
             "• TikTok — видео\n"
             "• YouTube — видео и Shorts\n\n"
-            f"{cookies_line}\n\n"
+            f"{cookies_line}\n"
+            f"{yt_cookies_line}\n\n"
             "⚙️ <b>Команды:</b>\n"
             "/cookies — добавить свои cookies Instagram (только в личке)\n"
+            "/cookies_youtube — добавить свои cookies YouTube (только в личке)\n"
             "/quality — качество YouTube (360 / 480 / 720p)\n"
             "/start — это сообщение"
             f"{admin_section}\n\n"
@@ -272,9 +293,13 @@ class InstaloadBot:
         message = self.msg(update)
         if not message:
             return
+        uid = message.from_user.id if message.from_user else None
         if message.chat_id in self.waiting_caption:
             self.waiting_caption.discard(message.chat_id)
             await message.reply_text("❌ Ввод подписи отменён.")
+        elif uid in self.waiting_shared_yt:
+            self.waiting_shared_yt.discard(uid)
+            await message.reply_text("❌ Загрузка общих cookies YouTube отменена.")
         else:
             await message.reply_text("Нечего отменять.")
 
@@ -317,31 +342,152 @@ class InstaloadBot:
             await message.reply_text(
                 f"🍪 Твои cookies Instagram: <b>добавлены</b> ({who}, {meta.count} cookies, обновлены {when}).\n\n"
                 "Чтобы заменить — просто пришли новый файл или строку.\n"
-                "Удалить: /cookies_delete",
+                "Удалить: /cookies_delete\n"
+                "YouTube: /cookies_youtube",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить мои cookies",
                                                                           callback_data="cookies_delete")]]),
             )
         else:
-            await message.reply_text(self.COOKIES_HOWTO, parse_mode=ParseMode.HTML)
+            await message.reply_text(self.COOKIES_HOWTO + "\n\n🎬 Cookies для YouTube — отдельная команда: /cookies_youtube",
+                                     parse_mode=ParseMode.HTML)
 
     async def cmd_cookies_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = self.msg(update)
         if not message or not message.from_user:
             return
         if self.cookies.delete(message.from_user.id):
-            await message.reply_text("🗑 Твои cookies удалены.")
+            await message.reply_text("🗑 Твои cookies Instagram удалены.")
         else:
-            await message.reply_text("У тебя нет сохранённых cookies.")
+            await message.reply_text("У тебя нет сохранённых cookies Instagram.")
+
+    # ── /cookies_youtube ────────────────────────────────────────────────────
+
+    YT_COOKIES_HOWTO = (
+        "🍪 <b>Как добавить свои cookies YouTube</b>\n\n"
+        "Нужны, когда YouTube отвечает «Sign in to confirm you're not a bot»: он подозревает IP сервера "
+        "и требует вход в аккаунт. Бот использует cookies <b>только для твоих ссылок YouTube</b>, "
+        "хранит их в отдельном файле (доступ только у системного пользователя сервера) и никому не показывает. "
+        "Удалить можно в любой момент: /cookies_youtube_delete.\n\n"
+        "⚠️ YouTube быстро «ротирует» cookies в открытой вкладке, и такой экспорт скоро перестаёт работать. "
+        "Поэтому экспортируй так (рекомендация yt-dlp):\n"
+        "1. Открой <b>приватное окно</b> (инкогнито) и войди в аккаунт Google/YouTube — лучше в отдельный.\n"
+        "2. В той же вкладке открой <code>https://www.youtube.com/robots.txt</code> (чтобы cookies не ротировались).\n"
+        "3. Расширением «Get cookies.txt LOCALLY» (Chrome/Edge) или «cookies.txt» (Firefox) нажми "
+        "<b>Export</b> — сохранится <code>youtube.com_cookies.txt</code>.\n"
+        "4. <b>Закрой приватное окно</b> (не нажимай «Выйти» — выход отзовёт сессию).\n"
+        "5. Отправь файл мне <b>сюда, в личные сообщения</b>.\n\n"
+        "Подходит и JSON-экспорт (Cookie-Editor), и строка вида "
+        "<code>SID=…; HSID=…; __Secure-3PSID=…; LOGIN_INFO=…</code> — но файл надёжнее.\n\n"
+        "Платформу я определяю по содержимому: файл с cookies youtube.com / google.com сохранится как cookies YouTube. "
+        "Из файла остаются только cookies youtube.com и google.com — остальное выбрасывается.\n\n"
+        "Если снова появится «подтвердите, что вы не бот» — cookies протухли, экспортируй заново."
+    )
+
+    async def _require_private(self, message: Message, command: str) -> bool:
+        if message.chat.type == ChatType.PRIVATE:
+            return True
+        await message.reply_text(
+            f"🔒 Cookies добавляются только в личных сообщениях — напиши {self.private_link()} и отправь /{command}."
+        )
+        return False
+
+    async def cmd_cookies_youtube(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = self.msg(update)
+        if not message or not message.from_user:
+            return
+        if not await self._require_private(message, "cookies_youtube"):
+            return
+        uid = message.from_user.id
+        admin_note = (
+            "\n\n🔑 Админ: чтобы cookies применялись ко <b>всем</b>, у кого нет своих, — /cookies_youtube_shared."
+            if self.is_admin(uid) else ""
+        )
+        if self.yt_cookies.has(uid):
+            meta = self.yt_cookies.meta(uid)
+            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(meta.updated_at)) if meta.updated_at else "—"
+            await message.reply_text(
+                f"🍪 Твои cookies YouTube: <b>добавлены</b> ({meta.count} cookies, обновлены {when}).\n\n"
+                "Чтобы заменить — просто пришли новый файл или строку.\n"
+                "Удалить: /cookies_youtube_delete" + admin_note,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить мои cookies YouTube",
+                                                                          callback_data="cookies_delete_youtube")]]),
+            )
+        else:
+            await message.reply_text(self.YT_COOKIES_HOWTO + admin_note, parse_mode=ParseMode.HTML)
+
+    async def cmd_cookies_youtube_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = self.msg(update)
+        if not message or not message.from_user:
+            return
+        if self.yt_cookies.delete(message.from_user.id):
+            await message.reply_text("🗑 Твои cookies YouTube удалены.")
+        else:
+            await message.reply_text("У тебя нет сохранённых cookies YouTube.")
+
+    async def cmd_cookies_youtube_shared(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Админ: следующие присланные cookies YouTube сохраняются как общие (для всех без своих)."""
+        message = self.msg(update)
+        if not message or not message.from_user or not self.is_admin(message.from_user.id):
+            return
+        if not await self._require_private(message, "cookies_youtube_shared"):
+            return
+        has_shared = config.YT_COOKIES_SHARED_FILE.is_file()
+        self.waiting_shared_yt.add(message.from_user.id)
+        await message.reply_text(
+            f"🔑 Общие cookies YouTube: <b>{'есть' if has_shared else 'нет'}</b>.\n\n"
+            "Пришли файл или строку cookies YouTube следующим сообщением — они сохранятся как общие и будут "
+            "использоваться для всех, у кого нет своих (/cookies_youtube). Инструкция по экспорту — там же.\n"
+            "Отмена: /cancel. Удалить общие: /cookies_youtube_shared_delete",
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def cmd_cookies_youtube_shared_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = self.msg(update)
+        if not message or not message.from_user or not self.is_admin(message.from_user.id):
+            return
+        self.waiting_shared_yt.discard(message.from_user.id)
+        try:
+            config.YT_COOKIES_SHARED_FILE.unlink()
+            await message.reply_text("🗑 Общие cookies YouTube удалены.")
+            log.info("общие cookies youtube удалены admin=%s", message.from_user.id)
+        except FileNotFoundError:
+            await message.reply_text("Общих cookies YouTube нет.")
 
     async def _store_cookies(self, message: Message, raw: bytes | str, source: str) -> None:
-        """Общий путь для файла и строки: сохранить → удалить сообщение → проверить сессию."""
+        """
+        Общий путь для файла и строки: определить площадку → сохранить → удалить сообщение
+        → проверить сессию (Instagram). В одном файле могут оказаться cookies обеих площадок.
+        """
         uid = message.from_user.id  # type: ignore[union-attr]
-        try:
-            cookies_list, _ = self.cookies.save(uid, raw)
-        except CookieError as e:
+        platforms = detect_platforms(raw)
+        if not platforms:
             await message.reply_text(
-                f"❌ Не похоже на cookies Instagram: {e}.\n\nКак экспортировать правильно — /cookies",
+                "❌ Не похоже на cookies Instagram или YouTube: в файле нет cookies instagram.com / youtube.com.\n\n"
+                "Как экспортировать правильно — /cookies (Instagram) и /cookies_youtube (YouTube).",
+            )
+            return
+
+        to_shared_yt = uid in self.waiting_shared_yt and self.is_admin(uid)
+        saved: dict[str, list] = {}
+        errors: list[str] = []
+        for platform in platforms:
+            try:
+                if platform == "youtube" and to_shared_yt:
+                    saved[platform] = save_shared(config.YT_COOKIES_SHARED_FILE, raw, platform)
+                else:
+                    saved[platform], _ = self.stores[platform].save(uid, raw)
+            except CookieError as e:
+                errors.append(f"{COOKIE_PLATFORMS[platform].label}: {e}")
+        if "youtube" in saved and to_shared_yt:
+            self.waiting_shared_yt.discard(uid)
+
+        if not saved:
+            await message.reply_text(
+                "❌ Cookies не сохранены.\n" + "\n".join(f"• {html.escape(e)}" for e in errors)
+                + "\n\nКак экспортировать правильно — /cookies и /cookies_youtube.",
+                parse_mode=ParseMode.HTML,
             )
             return
 
@@ -351,26 +497,39 @@ class InstaloadBot:
             await message.delete()
             deleted = True
 
+        lines: list[str] = []
+        for platform, cl in saved.items():
+            where = " (общие, для всех)" if platform == "youtube" and to_shared_yt else ""
+            lines.append(f"✅ {COOKIE_PLATFORMS[platform].label}: cookies сохранены{where} "
+                         f"({html.escape(summarize(cl, platform))}).")
+        lines += [f"⚠️ {html.escape(e)}" for e in errors]
+        lines.append("🧹 Сообщение с cookies удалено из чата." if deleted else
+                     "⚠️ Не смог удалить твоё сообщение — удали его сам.")
+        yt_line = ("🎬 Cookies YouTube применятся к ссылкам YouTube. Если снова будет «подтвердите, что вы не бот» — "
+                   "экспортируй заново по инструкции /cookies_youtube.") if "youtube" in saved else ""
+        ig_checking = "instagram" in saved
+
         note = await message.chat.send_message(
-            f"✅ Cookies сохранены ({html.escape(summarize(cookies_list))}).\n"
-            + ("🧹 Сообщение с cookies удалено из чата.\n" if deleted else
-               "⚠️ Не смог удалить твоё сообщение — удали его сам.\n")
-            + "⏳ Проверяю сессию…",
+            "\n".join(lines) + (f"\n{yt_line}" if yt_line else "") + ("\n⏳ Проверяю сессию Instagram…" if ig_checking else ""),
             parse_mode=ParseMode.HTML,
         )
-        log.info("cookies user=%s получены (%s)", uid, source)
+        for platform in saved:
+            log.info("cookies %s user=%s получены (%s)%s", platform, uid, source, " [shared]" if platform == "youtube" and to_shared_yt else "")
+        if not ig_checking:
+            return
 
         check = await media.check_ig_cookies(self.cookies.path_for(uid))  # type: ignore[arg-type]
         meta = self.cookies.meta(uid)
         if check.ok and check.username:
             meta.username, meta.checked = check.username, True
             self.cookies.save_meta(uid, meta)
-            result = f"✅ Сессия активна: <b>@{html.escape(check.username)}</b>. Теперь твои ссылки Instagram скачиваются с твоим аккаунтом."
+            result = f"✅ Сессия Instagram активна: <b>@{html.escape(check.username)}</b>. Теперь твои ссылки Instagram скачиваются с твоим аккаунтом."
         else:
-            result = (f"⚠️ Cookies сохранены, но проверить сессию не удалось: {html.escape(check.error or 'нет ответа')}.\n"
+            result = (f"⚠️ Cookies Instagram сохранены, но проверить сессию не удалось: {html.escape(check.error or 'нет ответа')}.\n"
                       "Если загрузки не пойдут — экспортируй cookies заново, не выходя из аккаунта.")
         with contextlib.suppress(TelegramError):
-            await note.edit_text(result, parse_mode=ParseMode.HTML)
+            await note.edit_text("\n".join(lines) + (f"\n{yt_line}" if yt_line else "") + "\n" + result,
+                                 parse_mode=ParseMode.HTML)
 
     async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.message
@@ -411,8 +570,9 @@ class InstaloadBot:
             f"Свободно в tmp: {media.disk_free_mb(config.TMP_DIR):.0f} МБ\n"
             f"yt-dlp: {html.escape(ver)}\n"
             f"ffmpeg: {'ок' if os.access(config.FFMPEG_BIN, os.X_OK) else '❌ не найден'}\n"
-            f"Пользователей с cookies: {self.cookies.count()}\n"
-            f"Общие cookies IG: {'да' if config.IG_COOKIES_SHARED and os.path.isfile(config.IG_COOKIES_SHARED) else 'нет'}",
+            f"Пользователей с cookies IG / YouTube: {self.cookies.count()} / {self.yt_cookies.count()}\n"
+            f"Общие cookies IG: {'да' if config.IG_COOKIES_SHARED and os.path.isfile(config.IG_COOKIES_SHARED) else 'нет'}\n"
+            f"Общие cookies YouTube: {'да' if self._shared_yt_path() else 'нет'}",
             parse_mode=ParseMode.HTML,
         )
 
@@ -469,9 +629,16 @@ class InstaloadBot:
         elif data == "cookies_delete":
             await query.answer()
             if self.cookies.delete(uid):
-                await query.edit_message_text("🗑 Твои cookies удалены.")
+                await query.edit_message_text("🗑 Твои cookies Instagram удалены.")
             else:
-                await query.edit_message_text("У тебя нет сохранённых cookies.")
+                await query.edit_message_text("У тебя нет сохранённых cookies Instagram.")
+
+        elif data == "cookies_delete_youtube":
+            await query.answer()
+            if self.yt_cookies.delete(uid):
+                await query.edit_message_text("🗑 Твои cookies YouTube удалены.")
+            else:
+                await query.edit_message_text("У тебя нет сохранённых cookies YouTube.")
         else:
             await query.answer()
 
@@ -493,7 +660,7 @@ class InstaloadBot:
             return
 
         # строка cookies в личке
-        if user and message.chat.type == ChatType.PRIVATE and looks_like_header_string(text):
+        if user and message.chat.type == ChatType.PRIVATE and header_string_platform(text):
             await self._store_cookies(message, text, "строка")
             return
 
@@ -566,9 +733,22 @@ class InstaloadBot:
                 return own, "user"
             if config.IG_COOKIES_SHARED and os.path.isfile(config.IG_COOKIES_SHARED):
                 return Path(config.IG_COOKIES_SHARED), "shared"
-        elif job.platform == "youtube" and config.YT_COOKIES and os.path.isfile(config.YT_COOKIES):
-            return Path(config.YT_COOKIES), "shared"
+        elif job.platform == "youtube":
+            own = self.yt_cookies.path_for(job.user_id)
+            if own:
+                return own, "user"
+            shared = self._shared_yt_path()
+            if shared:
+                return shared, "shared"
         return None, ""
+
+    @staticmethod
+    def _shared_yt_path() -> Path | None:
+        """Общие cookies YouTube: сначала загруженные админом через бота, потом YT_COOKIES из env."""
+        for candidate in (config.YT_COOKIES_SHARED_FILE, config.YT_COOKIES):
+            if candidate and os.path.isfile(candidate):
+                return Path(candidate)
+        return None
 
     async def _edit(self, status: Message, text: str) -> None:
         with contextlib.suppress(TelegramError):
@@ -587,7 +767,7 @@ class InstaloadBot:
             cookies_copy: Path | None = None
             if cookies_src:
                 # yt-dlp перезаписывает cookiefile; работаем с копией и потом сохраняем её обратно
-                cookies_copy = tmp_dir / "ig_cookies.txt"
+                cookies_copy = tmp_dir / "cookies.txt"
                 shutil.copyfile(cookies_src, cookies_copy)
                 os.chmod(cookies_copy, 0o600)
 
@@ -615,17 +795,23 @@ class InstaloadBot:
                         if "авториз" in hres.error or "login" in hres.error.lower() else ""
                     )
 
-            # сохраняем обновлённые cookies (ротация Instagram)
-            if cookies_copy and job.platform == "instagram":
+            # сохраняем обновлённые cookies (ротация Instagram / YouTube)
+            if cookies_copy and cookies_src and job.platform in self.stores:
                 if owner == "user":
-                    self.cookies.write_back(job.user_id, cookies_copy)
+                    self.stores[job.platform].write_back(job.user_id, cookies_copy)
                 elif owner == "shared":
-                    write_back_shared(config.IG_COOKIES_SHARED, cookies_copy)
+                    write_back_shared(str(cookies_src), cookies_copy, job.platform)
 
             if not files:
                 hint = error or DEFAULT_HINTS[job.platform]
                 if job.platform == "instagram" and owner != "user":
                     hint += f"\n💡 Добавь свои cookies Instagram — напиши {self.private_link()} команду /cookies"
+                elif job.platform == "youtube" and error == media.YT_AUTH_HINT:
+                    if owner == "user":
+                        hint += "\n💡 Твои cookies YouTube, похоже, протухли — экспортируй заново: /cookies_youtube"
+                    else:
+                        hint += (f"\n💡 Добавь свои cookies YouTube — напиши {self.private_link()} "
+                                 "команду /cookies_youtube")
                 await self._edit(job.status, f"❌ Не удалось скачать {label}.\n{hint}\n🔗 {clean_url(job.url, job.platform)}")
                 self.state.bump("failed")
                 return

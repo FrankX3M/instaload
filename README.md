@@ -80,7 +80,7 @@ INSTALOAD_DATA_DIR=/tmp/il /opt/instaload/venv/bin/python -m instaload
 | `IG_COOKIES_SHARED` | — | общий файл cookies Instagram для тех, у кого нет своих (и для постов каналов). Необязательно |
 | `SOURCE_LINK` | 1 | под каждым медиа — «🔗 Источник» со ссылкой на оригинал (очищена от `igsh`, `utm_*`, `si`). Ссылка остаётся, даже когда исходное сообщение удалено |
 | `DELETE_ORIGINAL` | 1 | удалять сообщение, в котором была только ссылка. `0` — оставлять |
-| `YT_COOKIES` | — | cookies YouTube против «Sign in to confirm you're not a bot» |
+| `YT_COOKIES` | — | файл cookies YouTube (Netscape), положенный на сервер вручную. Последний в цепочке: свои cookies пользователя → общие, загруженные админом через бота → `YT_COOKIES` |
 | `YTDLP_CHANNEL` | stable | канал обновления: `stable` / `nightly` / `master` |
 | `SMOKE_URLS` | одно видео YouTube | ссылки для smoke-теста после обновления yt-dlp |
 
@@ -90,13 +90,17 @@ INSTALOAD_DATA_DIR=/tmp/il /opt/instaload/venv/bin/python -m instaload
 |---|---|---|
 | ссылка в чат | все | ставит в очередь; бот отвечает «в очереди, впереди N» и редактирует статус по ходу |
 | `/cookies` | все, только в личке | статус своих cookies Instagram и инструкция, как добавить |
-| `/cookies_delete` | все | удалить свои cookies |
+| `/cookies_delete` | все | удалить свои cookies Instagram |
+| `/cookies_youtube` | все, только в личке | статус своих cookies YouTube и инструкция, как добавить |
+| `/cookies_youtube_delete` | все | удалить свои cookies YouTube |
+| `/cookies_youtube_shared` | админ, только в личке | следующие присланные cookies YouTube сохранить как **общие** — для всех, у кого нет своих (`/cancel` — отмена) |
+| `/cookies_youtube_shared_delete` | админ | удалить общие cookies YouTube |
 | `/quality` | все | качество YouTube для чата: 360 / 480 / 720p |
 | `/caption` | админ | подпись под медиа (`/caption off` — убрать) |
-| `/stats` | админ | очередь, активные задачи, RSS, свободный диск, версия yt-dlp, пользователей с cookies |
+| `/stats` | админ | очередь, активные задачи, RSS, свободный диск, версия yt-dlp, пользователей с cookies IG / YouTube, наличие общих |
 | `/update` | админ | запустить `update_ytdlp.sh` сейчас и показать результат |
 
-Файл `.txt`/`.json` или строка `sessionid=…; csrftoken=…`, присланные боту в личку, воспринимаются как cookies Instagram (см. [docs/COOKIES.md](docs/COOKIES.md)).
+Файл `.txt`/`.json` или строка `sessionid=…; csrftoken=…` / `SID=…; __Secure-3PSID=…`, присланные боту в личку, воспринимаются как cookies — **площадка определяется по содержимому** (Instagram или YouTube, можно обе из одного файла). См. [docs/COOKIES.md](docs/COOKIES.md).
 
 ## Cookies Instagram: как это устроено
 
@@ -104,6 +108,14 @@ INSTALOAD_DATA_DIR=/tmp/il /opt/instaload/venv/bin/python -m instaload
 - Для ссылки Instagram бот берёт cookies **по `from_user.id` отправителя**. Нет своих → `IG_COOKIES_SHARED`, если задан → без cookies. В группе каждый участник скачивает своими cookies; чужие не используются никогда.
 - yt-dlp работает с копией файла в tmp задачи (он перезаписывает cookiefile); после задачи обновлённая копия валидируется и записывается обратно — так переживается ротация `csrftoken`/`sessionid`.
 - Значения cookies в логи не попадают; в журнале только `user=<id>` и `@username`.
+
+## Cookies YouTube: как это устроено
+
+- Нужны, когда YouTube отвечает «Sign in to confirm you're not a bot» (IP сервера под подозрением) или видео с возрастным ограничением. Бот в этом случае показывает подсказку `/cookies_youtube`.
+- Пользователь присылает cookies боту в личку так же, как для Instagram. Из файла остаются только `youtube.com` и `google.com` (авторизация YouTube живёт на обоих доменах), требуется хотя бы одна из `SID` / `__Secure-1PSID` / `__Secure-3PSID` / `SAPISID` / `LOGIN_INFO`. Хранятся в `/var/lib/instaload/cookies/youtube/<user_id>.txt`, права 0600.
+- Для ссылки YouTube порядок такой: **свои cookies отправителя** → общие cookies админа (`/cookies_youtube_shared`, файл `/var/lib/instaload/youtube_shared.txt`) → `YT_COOKIES` из env → без cookies. Обновлённая yt-dlp копия записывается обратно.
+- Совет по экспорту (рекомендация yt-dlp): приватное окно → вход → в той же вкладке открыть `youtube.com/robots.txt` → экспорт → закрыть окно, не нажимая «Выйти». Иначе YouTube быстро ротирует cookies, и экспорт перестаёт работать.
+- Cookies YouTube — это сессия Google-аккаунта. Лучше отдельный аккаунт: YouTube может ограничить аккаунт, с которого качают автоматически.
 
 ## Автообновление yt-dlp
 
@@ -178,7 +190,7 @@ sudo -u instaload /var/lib/instaload/bin/yt-dlp -F 'https://youtu.be/…'   # к
 Типичные ситуации:
 
 - **«Instagram требует авторизацию»** — у пользователя нет cookies или они протухли → `/cookies`.
-- **«YouTube требует подтверждения»** — IP датацентра под подозрением; `YT_COOKIES` с cookies залогиненного аккаунта YouTube помогает, но не гарантированно.
+- **«YouTube требует подтверждения»** — IP датацентра под подозрением → `/cookies_youtube` (свои cookies) или, для всех сразу, админу `/cookies_youtube_shared`. Помогает не гарантированно; если cookies были, но ошибка осталась — они протухли, экспортируйте заново.
 - **Бот убит по памяти** — `systemctl status` покажет `oom-kill`; поднимите `MemoryMax` в юните (300 МБ хватает для 1 воркера) или снизьте `WORKERS`/`MAX_DOWNLOAD_MB`.
 - **Загрузки медленные при `WORKERS=2` на 1 vCPU** — так и будет: yt-dlp+ffmpeg дерутся за CPU и диск, ставьте 1.
 

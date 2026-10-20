@@ -173,3 +173,93 @@ def test_caption_always_contains_source():
     # источник выключен
     assert build_caption(url, "instagram", with_source=False) is None
     assert build_caption(url, "instagram", "text", with_source=False) == "text"
+
+
+# ─── YouTube cookies ─────────────────────────────────────────────────────────
+
+YT_NETSCAPE = """# Netscape HTTP Cookie File
+.youtube.com\tTRUE\t/\tTRUE\t1790000000\tVISITOR_INFO1_LIVE\tvis
+#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1790000000\tLOGIN_INFO\tlogin-yt
+#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1790000000\t__Secure-3PSID\tyt-psid
+#HttpOnly_.google.com\tTRUE\t/\tTRUE\t1790000000\t__Secure-3PSID\tgoogle-psid
+.google.com\tTRUE\t/\tTRUE\t1790000000\tSID\tgsid
+.instagram.com\tTRUE\t/\tTRUE\t1790000000\tsessionid\tshould-not-be-in-yt
+.facebook.com\tTRUE\t/\tTRUE\t1790000000\tc_user\tdropped
+"""
+
+
+def test_parse_youtube_keeps_youtube_and_google_only():
+    cs = cookies.parse_cookies(YT_NETSCAPE, "youtube")
+    assert {c.domain.lstrip(".") for c in cs} == {"youtube.com", "google.com"}
+    assert "sessionid" not in {c.name for c in cs}
+    # одноимённые cookies на разных доменах не затирают друг друга
+    psid = {c.domain.lstrip("."): c.value for c in cs if c.name == "__Secure-3PSID"}
+    assert psid == {"youtube.com": "yt-psid", "google.com": "google-psid"}
+    text = cookies.to_netscape_text(cs, "youtube")
+    assert "youtube.com / google.com" in text and "facebook" not in text and "instagram" not in text
+    assert len(cookies.parse_cookies(text, "youtube")) == len(cs)
+
+
+def test_detect_platforms():
+    assert cookies.detect_platforms(NETSCAPE) == ["instagram"]
+    assert cookies.detect_platforms(YT_NETSCAPE) == ["instagram", "youtube"]
+    assert cookies.detect_platforms(YT_NETSCAPE.replace(".instagram.com", ".example.org")) == ["youtube"]
+    assert cookies.detect_platforms("sessionid=abc; csrftoken=x") == ["instagram"]
+    assert cookies.detect_platforms("SID=abc; HSID=x; __Secure-3PSID=y") == ["youtube"]
+    assert cookies.detect_platforms(JSON_EXPORT) == ["instagram"]  # у youtube там нет cookies входа
+    assert cookies.detect_platforms("") == [] and cookies.detect_platforms("{bad json") == []
+    assert cookies.detect_platforms("просто текст") == []
+    # без cookies входа — всё равно youtube (по домену), чтобы показать конкретную ошибку
+    assert cookies.detect_platforms(".google.com\tTRUE\t/\tTRUE\t0\tNID\tx\n") == ["youtube"]
+    # случайная cookie google.com в экспорте Instagram не делает его «YouTube»
+    assert cookies.detect_platforms(NETSCAPE) == ["instagram"]
+
+
+def test_youtube_header_string():
+    raw = "SID=abc; HSID=h; __Secure-3PSID=p; LOGIN_INFO=l"
+    assert cookies.header_string_platform(raw) == "youtube"
+    assert cookies.header_string_platform("sessionid=1; csrftoken=2") == "instagram"
+    assert cookies.header_string_platform("привет SID=1") is None
+    cs = cookies.parse_cookies(raw, "youtube")
+    assert {c.name for c in cs} == {"SID", "HSID", "__Secure-3PSID", "LOGIN_INFO"}
+    assert all(c.domain == ".youtube.com" for c in cs)
+
+
+def test_youtube_requires_login_cookies():
+    only_visitor = ".youtube.com\tTRUE\t/\tTRUE\t0\tVISITOR_INFO1_LIVE\tx\n"
+    with pytest.raises(cookies.CookieError, match="входа"):
+        cookies.parse_cookies(only_visitor, "youtube")
+    with pytest.raises(cookies.CookieError, match="youtube.com"):
+        cookies.parse_cookies(".instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tx\n", "youtube")
+
+
+def test_youtube_store_is_separate_from_instagram(tmp_path):
+    ig = cookies.CookieStore(tmp_path / "cookies")
+    yt = cookies.CookieStore(tmp_path / "cookies" / "youtube", platform="youtube")
+    ig.save(7, NETSCAPE)
+    assert ig.has(7) and not yt.has(7) and ig.count() == 1 and yt.count() == 0
+    yt.save(7, YT_NETSCAPE)
+    assert yt.has(7) and ig.count() == 1 and yt.count() == 1
+    assert "instagram" not in yt.path_for(7).read_text()
+    assert oct(yt.path_for(7).stat().st_mode & 0o777) == "0o600"
+    upd = tmp_path / "upd.txt"
+    upd.write_text(YT_NETSCAPE.replace("login-yt", "ROTATED"))
+    assert yt.write_back(7, upd) and "ROTATED" in yt.path_for(7).read_text()
+    upd.write_text(".youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tonly\n")
+    assert not yt.write_back(7, upd) and "ROTATED" in yt.path_for(7).read_text()
+    assert yt.delete(7) and ig.has(7)
+
+
+def test_save_and_write_back_shared(tmp_path):
+    shared = tmp_path / "youtube_shared.txt"
+    cookies.save_shared(shared, YT_NETSCAPE, "youtube")
+    assert oct(shared.stat().st_mode & 0o777) == "0o600" and "instagram" not in shared.read_text()
+    upd = tmp_path / "upd.txt"
+    upd.write_text(shared.read_text().replace("login-yt", "ROTATED"))
+    assert cookies.write_back_shared(str(shared), upd, "youtube") and "ROTATED" in shared.read_text()
+    with pytest.raises(cookies.CookieError):
+        cookies.save_shared(tmp_path / "x.txt", NETSCAPE, "youtube")
+
+
+def test_youtube_auth_hint_is_explained():
+    assert media.explain_ytdlp_error("ERROR: Sign in to confirm you’re not a bot") == media.YT_AUTH_HINT
