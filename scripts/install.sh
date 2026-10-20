@@ -46,12 +46,13 @@ die() { printf '\033[1;31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
 # ── архитектура ───────────────────────────────────────────────────────────────
 ARCH="$(uname -m)"
 case "$ARCH" in
-    x86_64)  YTDLP_ASSET=yt-dlp_linux;          FFMPEG_ARCH=amd64 ;;
-    aarch64) YTDLP_ASSET=yt-dlp_linux_aarch64;  FFMPEG_ARCH=arm64 ;;
-    armv7l)  YTDLP_ASSET=yt-dlp_linux_armv7l;   FFMPEG_ARCH=armhf ;;
+    x86_64)  YTDLP_ASSET=yt-dlp_linux;          FFMPEG_ARCH=amd64; DENO_ARCH=x86_64-unknown-linux-gnu ;;
+    aarch64) YTDLP_ASSET=yt-dlp_linux_aarch64;  FFMPEG_ARCH=arm64; DENO_ARCH=aarch64-unknown-linux-gnu ;;
+    armv7l)  YTDLP_ASSET=yt-dlp_linux_armv7l;   FFMPEG_ARCH=armhf; DENO_ARCH= ;;
     *) die "неподдерживаемая архитектура: $ARCH" ;;
 esac
 YTDLP_URL="${YTDLP_URL:-https://github.com/yt-dlp/yt-dlp/releases/latest/download/$YTDLP_ASSET}"
+DENO_URL="${DENO_URL:-https://github.com/denoland/deno/releases/latest/download/deno-${DENO_ARCH}.zip}"
 FFMPEG_URL="${FFMPEG_URL:-https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FFMPEG_ARCH}-static.tar.xz}"
 
 # ── системные пакеты ──────────────────────────────────────────────────────────
@@ -131,6 +132,21 @@ elif [[ ! -x "$BIN_DIR/ffmpeg" || ! -x "$BIN_DIR/ffprobe" || $FORCE_BINARIES -eq
     rm -rf "$tmpd"
 fi
 echo "  $("$BIN_DIR/ffmpeg" -version | head -1)"
+
+# ── Deno: JS-движок для yt-dlp ────────────────────────────────────────────────
+# Без него YouTube отдаёт только картинки («n challenge solving failed», «Only images are available»).
+# yt-dlp сам находит deno в PATH; бот добавляет $BIN_DIR в PATH подпроцессов.
+if [[ -z "${DENO_ARCH:-}" ]]; then
+    echo "  Deno для $ARCH не публикуется — YouTube может отдавать только картинки"
+elif [[ ! -x "$BIN_DIR/deno" || $FORCE_BINARIES -eq 1 ]]; then
+    say "Deno → $BIN_DIR (JS-движок для YouTube)"
+    tmpd=$(mktemp -d)
+    curl -fsSL --retry 3 -o "$tmpd/deno.zip" "$DENO_URL"
+    "$PY" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("deno", sys.argv[2])' "$tmpd/deno.zip" "$tmpd"
+    install -m 0755 "$tmpd/deno" "$BIN_DIR/deno"
+    rm -rf "$tmpd"
+fi
+[[ -x "$BIN_DIR/deno" ]] && echo "  $("$BIN_DIR/deno" --version | head -1)"
 
 # ── настройки ─────────────────────────────────────────────────────────────────
 say "Настройки → $ENV_FILE"

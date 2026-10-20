@@ -32,7 +32,7 @@ sudo systemctl start instaload
 journalctl -u instaload -f
 ```
 
-`install.sh` идемпотентен: создаёт пользователя `instaload`, venv, скачивает бинарник yt-dlp и статический ffmpeg под архитектуру (x86_64 / aarch64 / armv7l), ставит systemd-юниты и включает таймер обновления. Повторный запуск обновляет код и зависимости, не трогая настройки и данные.
+`install.sh` идемпотентен: создаёт пользователя `instaload`, venv, скачивает бинарник yt-dlp, статический ffmpeg и Deno (JS-движок, без которого YouTube отдаёт yt-dlp только картинки) под архитектуру (x86_64 / aarch64 / armv7l), ставит systemd-юниты и включает таймер обновления. Повторный запуск обновляет код и зависимости, не трогая настройки и данные.
 
 Флаги: `--system-ffmpeg` (использовать ffmpeg из apt, если он уже есть на сервере), `--force-binaries` (перекачать yt-dlp и ffmpeg).
 
@@ -190,6 +190,7 @@ sudo -u instaload /var/lib/instaload/bin/yt-dlp -F 'https://youtu.be/…'   # к
 Типичные ситуации:
 
 - **«Instagram требует авторизацию»** — у пользователя нет cookies или они протухли → `/cookies`.
+- **«Нет подходящего формата» на YouTube, в логе `n challenge solving failed` / `Only images are available`** — нет JS-движка: `sudo bash scripts/install.sh` ставит Deno в `/opt/instaload/bin/deno`.
 - **«YouTube требует подтверждения»** — IP датацентра под подозрением → `/cookies_youtube` (свои cookies) или, для всех сразу, админу `/cookies_youtube_shared`. Помогает не гарантированно; если cookies были, но ошибка осталась — они протухли, экспортируйте заново.
 - **Бот убит по памяти** — `systemctl status` покажет `oom-kill`; поднимите `MemoryMax` в юните (300 МБ хватает для 1 воркера) или снизьте `WORKERS`/`MAX_DOWNLOAD_MB`.
 - **Загрузки медленные при `WORKERS=2` на 1 vCPU** — так и будет: yt-dlp+ffmpeg дерутся за CPU и диск, ставьте 1.
