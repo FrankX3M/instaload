@@ -1,6 +1,6 @@
 # instaload
 
-Telegram-бот, который по ссылке присылает в чат видео и фото из Instagram (Reels, посты, карусели), TikTok и YouTube. Версия 2 — переработка под слабый VPS (1 vCPU, 512 МБ–1 ГБ RAM) по результатам аудита: **без Docker**, systemd + venv, очередь с одним воркером, yt-dlp и ffmpeg в подпроцессах, потоковая отправка файлов, автообновление yt-dlp, **cookies Instagram у каждого пользователя свои**.
+Telegram-бот, который по ссылке присылает в чат видео и фото из Instagram (Reels, посты, карусели), TikTok, YouTube и Kinescope (ссылки вида `kinescope.io/sh/<id>/v/<id>`). Версия 2 — переработка под слабый VPS (1 vCPU, 512 МБ–1 ГБ RAM) по результатам аудита: **без Docker**, systemd + venv, очередь с одним воркером, yt-dlp и ffmpeg в подпроцессах, потоковая отправка файлов, автообновление yt-dlp, **cookies Instagram у каждого пользователя свои**.
 
 Пользовательская инструкция по cookies — [docs/COOKIES.md](docs/COOKIES.md).
 

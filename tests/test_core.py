@@ -12,7 +12,7 @@ import pytest
 os.environ.setdefault("BOT_TOKEN", "test")
 os.environ.setdefault("INSTALOAD_DATA_DIR", "/tmp/instaload-test")
 
-from instaload import config, cookies, media  # noqa: E402
+from instaload import config, cookies, kinescope, media  # noqa: E402
 from instaload.bot import extract_urls  # noqa: E402
 from instaload.state import State  # noqa: E402
 
@@ -145,3 +145,40 @@ def test_explain_ytdlp_error():
     assert "cookies" in media.explain_ytdlp_error("ERROR: [Instagram] X: login required").lower()
     assert "приватное" in media.explain_ytdlp_error("ERROR: Private video").lower()
     assert media.explain_ytdlp_error("something odd") == ""
+
+
+# ─── Kinescope ────────────────────────────────────────────────────────────────
+
+KS_URL = "https://kinescope.io/sh/eMondffL3VusdJCRu4JLMC/v/4d7c8f79-4c71-46b8-a241-3beb52da412a"
+
+
+def test_extract_urls_kinescope():
+    got = extract_urls(f"вот лекция {KS_URL}?t=10 и ещё https://youtu.be/jNQXAC9IVRw")
+    assert [p for p, _ in got] == ["kinescope", "youtube"]
+    assert got[0][1] == f"{KS_URL}?t=10"
+    assert extract_urls("https://kinescope.io/about") == []
+
+
+def test_kinescope_parse_url():
+    assert kinescope.parse_url(KS_URL) == ("eMondffL3VusdJCRu4JLMC", "4d7c8f79-4c71-46b8-a241-3beb52da412a")
+    with pytest.raises(kinescope.KinescopeError):
+        kinescope.parse_url("https://kinescope.io/embed/abc")
+
+
+def test_kinescope_extract_hls():
+    assert kinescope.extract_hls({"data": {"hls": "https://cdn.example/x/master.m3u8"}}) \
+        == "https://cdn.example/x/master.m3u8"
+    for bad in ({}, {"data": None}, {"data": {"hls": ""}}, {"data": {"hls": "http://insecure/x.m3u8"}},
+                {"data": {"hls": "file:///etc/passwd"}}, [], None):
+        with pytest.raises(kinescope.KinescopeError):
+            kinescope.extract_hls(bad)
+
+
+def test_build_ytdlp_cmd_kinescope(tmp_path):
+    m3u8 = "https://cdn.example/x/master.m3u8"
+    cmd = media.build_ytdlp_cmd(m3u8, "kinescope", tmp_path, "720", None, referer=KS_URL)
+    assert "--referer" in cmd and cmd[cmd.index("--referer") + 1] == KS_URL
+    assert cmd[cmd.index("--format") + 1] == "bv*+ba/b"
+    assert "--cookies" not in cmd and cmd[-1] == m3u8
+    # у остальных платформ Referer не добавляется
+    assert "--referer" not in media.build_ytdlp_cmd("https://youtu.be/x", "youtube", tmp_path, "480", None)
