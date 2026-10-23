@@ -35,7 +35,7 @@ from telegram.ext import (
     ContextTypes, Defaults, MessageHandler, filters,
 )
 
-from . import config, media, sender
+from . import config, kinescope, media, sender
 from .links import LABELS, build_caption, clean_url, extract_urls, source_line  # noqa: F401
 from .cookies import CookieError, CookieStore, looks_like_header_string, summarize, write_back_shared
 from .state import State
@@ -46,6 +46,7 @@ DEFAULT_HINTS = {
     "instagram": "Пост приватный, удалён или Instagram ограничил запросы с сервера.",
     "tiktok": "TikTok мог заблокировать запрос, попробуй позже.",
     "youtube": "Видео могло быть удалено, приватным или недоступным с IP сервера.",
+    "kinescope": "Видео приватное, удалено или защищено (DRM), либо ссылка устарела.",
 }
 
 
@@ -188,7 +189,8 @@ class InstaloadBot:
             "📱 <b>Платформы:</b>\n"
             "• Instagram — Reels, посты, фото и карусели\n"
             "• TikTok — видео\n"
-            "• YouTube — видео и Shorts\n\n"
+            "• YouTube — видео и Shorts\n"
+            "• Kinescope — видео по ссылке вида kinescope.io/sh/…/v/…\n\n"
             f"{cookies_line}\n\n"
             "⚙️ <b>Команды:</b>\n"
             "/cookies — добавить свои cookies Instagram (только в личке)\n"
@@ -593,12 +595,23 @@ class InstaloadBot:
 
             files: list[Path] = []
             error = ""
-            res = await media.download_ytdlp(job.url, job.platform, tmp_dir, job.quality, cookies_copy)
-            files, error = res.files, res.error
-            if res.detail and not files:
-                log.warning("%s yt-dlp: %s", job.tag, res.detail.replace("\n", " | "))
+            dl_url, referer = job.url, None
+            if job.platform == "kinescope":
+                # страница-шеринг → прямой m3u8 (один быстрый запрос к API Kinescope)
+                try:
+                    dl_url, referer = await kinescope.resolve_hls(job.url), job.url
+                except kinescope.KinescopeError as e:
+                    dl_url, error = "", str(e)
 
-            if not files and job.platform == "instagram" and not res.timed_out:
+            res = None
+            if dl_url:
+                res = await media.download_ytdlp(dl_url, job.platform, tmp_dir, job.quality,
+                                                 cookies_copy, referer)
+                files, error = res.files, res.error
+                if res.detail and not files:
+                    log.warning("%s yt-dlp: %s", job.tag, res.detail.replace("\n", " | "))
+
+            if not files and job.platform == "instagram" and res is not None and not res.timed_out:
                 await self._edit(job.status, "⏳ Пробую как фото-пост…")
                 meta = self.cookies.meta(job.user_id) if owner == "user" and job.user_id else None
                 hres = await media.download_instaloader(job.url, tmp_dir, cookies_copy,

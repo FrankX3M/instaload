@@ -166,7 +166,7 @@ def yt_format(quality: str) -> str:
 
 
 def build_ytdlp_cmd(url: str, platform: str, tmp_dir: Path, quality: str,
-                    cookies_file: Path | None) -> list[str]:
+                    cookies_file: Path | None, referer: str | None = None) -> list[str]:
     cmd = [
         config.YTDLP_BIN,
         "--no-warnings", "--quiet", "--no-progress", "--no-colors",
@@ -187,6 +187,11 @@ def build_ytdlp_cmd(url: str, platform: str, tmp_dir: Path, quality: str,
         cmd += ["--format", "b[ext=mp4]/b", "--no-playlist"]
     elif platform == "youtube":
         cmd += ["--format", yt_format(quality), "--no-playlist"]
+    elif platform == "kinescope":
+        # url здесь — прямой m3u8; CDN Kinescope проверяет Referer страницы-источника
+        cmd += ["--format", "bv*+ba/b", "--no-playlist"]
+    if referer:
+        cmd += ["--referer", referer]
     if cookies_file:
         cmd += ["--cookies", str(cookies_file)]
     cmd += ["--", url]
@@ -231,8 +236,8 @@ def explain_ytdlp_error(stderr: str) -> str:
 
 
 async def download_ytdlp(url: str, platform: str, tmp_dir: Path, quality: str,
-                         cookies_file: Path | None) -> DownloadResult:
-    cmd = build_ytdlp_cmd(url, platform, tmp_dir, quality, cookies_file)
+                         cookies_file: Path | None, referer: str | None = None) -> DownloadResult:
+    cmd = build_ytdlp_cmd(url, platform, tmp_dir, quality, cookies_file, referer)
     before = {p.name for p in tmp_dir.iterdir()}
     res = await run(cmd, timeout=config.DOWNLOAD_TIMEOUT_SEC, cwd=tmp_dir)
 

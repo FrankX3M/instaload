@@ -20,6 +20,9 @@ TIKTOK_PATTERN = re.compile(
     r"https?://(?:www\.|m\.)?(?:tiktok\.com/@[\w.]+/(?:video|photo)/\d+|(?:vm|vt)\.tiktok\.com/[A-Za-z0-9]+|"
     r"tiktok\.com/t/[A-Za-z0-9]+)/?(?:\?[^\s]*)?"
 )
+KINESCOPE_PATTERN = re.compile(
+    r"https?://(?:www\.)?kinescope\.io/sh/[A-Za-z0-9_-]+/v/[A-Za-z0-9_-]+/?(?:\?[^\s]*)?"
+)
 YOUTUBE_PATTERN = re.compile(
     r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?(?:[^&\s]+&)*v=|shorts/|embed/|live/)|youtu\.be/)"
     r"[A-Za-z0-9_-]+(?:[&?][^\s]*)?"
@@ -29,6 +32,7 @@ PLATFORMS = (
     ("instagram", INSTAGRAM_PATTERN, "Instagram"),
     ("tiktok", TIKTOK_PATTERN, "TikTok"),
     ("youtube", YOUTUBE_PATTERN, "YouTube"),
+    ("kinescope", KINESCOPE_PATTERN, "Kinescope"),
 )
 LABELS = {p: label for p, _, label in PLATFORMS}
 
